@@ -164,6 +164,7 @@ def main(override_config: OmegaConf):
 
     EXPORT_POLICY = False
     EXPORT_ONNX = True
+    SKIP_EVAL = override_config.get('skip_eval', False)  # 添加跳过评估的选项
 
     checkpoint_path = str(checkpoint)
 
@@ -194,6 +195,11 @@ def main(override_config: OmegaConf):
 
         logger.info(f'Exported policy as onnx to: {os.path.join(exported_policy_path, exported_onnx_name)}')
 
+    # 如果只需要导出 ONNX，可以跳过评估循环
+    if SKIP_EVAL:
+        logger.info('Skipping evaluation, exiting after ONNX export.')
+        return
+    
     algo.evaluate_policy()
 
 
