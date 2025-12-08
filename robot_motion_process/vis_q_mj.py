@@ -40,7 +40,7 @@ def add_visual_capsule(scene, point1, point2, radius, rgba):
                             point2[0], point2[1], point2[2])
 
 def key_call_back( keycode):
-    global curr_start, num_motions, motion_id, motion_acc, time_step, dt, speed, paused, rewind, motion_data_keys, contact_mask, curr_time, resave
+    global switch_motion, curr_start, num_motions, motion_id, motion_acc, time_step, dt, speed, paused, rewind, motion_data_keys, contact_mask, curr_time, resave
     if chr(keycode) == "R":
         print("Reset")
         time_step = 0
@@ -71,6 +71,16 @@ def key_call_back( keycode):
         print('Modify right foot contact!!!')
         contact_mask[curr_time][1] = 1. - contact_mask[curr_time][1]
         resave = True
+    elif chr(keycode) == ']': # 下一个动作
+        motion_id = (motion_id + 1) % num_motions
+        print(f"Switching to Next Motion: ID {motion_id}")
+        switch_motion = True
+        time_step = 0
+    elif chr(keycode) == '[': # 上一个动作
+        motion_id = (motion_id - 1 + num_motions) % num_motions
+        print(f"Switching to Prev Motion: ID {motion_id}")
+        switch_motion = True
+        time_step = 0
     else:
         print("not mapped", chr(keycode), keycode)
     
@@ -78,7 +88,7 @@ def key_call_back( keycode):
         
 @hydra.main(version_base=None)
 def main(cfg : DictConfig) -> None:
-    global curr_start, num_motions, motion_id, motion_acc, time_step, dt, speed, paused, rewind, motion_data_keys, contact_mask, curr_time, resave
+    global switch_motion, curr_start, num_motions, motion_id, motion_acc, time_step, dt, speed, paused, rewind, motion_data_keys, contact_mask, curr_time, resave
     curr_start, num_motions, motion_id, motion_acc, time_step, dt, speed, paused, rewind \
         = 0, 1, 0, set(), 0, 1/30, 1.0, False, False
     # if 'dt' in cfg:
@@ -86,9 +96,12 @@ def main(cfg : DictConfig) -> None:
     motion_file = cfg.motion_file
     motion_data = joblib.load(motion_file)
     motion_data_keys = list(motion_data.keys())
+    num_motions = len(motion_data_keys)
     curr_motion_key = motion_data_keys[motion_id]
     curr_motion = motion_data[curr_motion_key]
     print(motion_file)
+    
+    switch_motion = False # 初始化标志位
     
     speed = 1.0 if 'speed' not in cfg else cfg.speed
     hang = False if 'hang' not in cfg else cfg.hang
@@ -154,6 +167,28 @@ def main(cfg : DictConfig) -> None:
         
         # breakpoint()
         while viewer.is_running():
+            if switch_motion:
+                curr_motion_key = motion_data_keys[motion_id]
+                curr_motion = motion_data[curr_motion_key]
+                print(f"Now Playing: {curr_motion_key}")
+                
+                # 如果不同动作的 FPS 不一样，这里还需要更新 dt
+                if 'fps' in curr_motion:
+                    dt = 1.0 / curr_motion['fps']
+                
+                # 更新可视化的辅助数据
+                if not vis_smpl:
+                    # 重新计算 FK
+                    pose_aa = torch.from_numpy(curr_motion['pose_aa']).unsqueeze(0)
+                    root_trans = torch.from_numpy(curr_motion['root_trans_offset']).unsqueeze(0)
+                    fk_return = humanoid_fk.fk_batch(pose_aa, root_trans)
+                    joint_gt = fk_return.global_translation_extend[0]
+                elif vis_smpl:
+                    # 如果是 SMPL 模式，直接读取
+                    joint_gt = motion_data[curr_motion_key]['smpl_joints']
+                
+                switch_motion = False # 重置标志位
+                
             step_start = time.time()
             if time_step >= curr_motion['dof'].shape[0]*dt:
                 time_step -= curr_motion['dof'].shape[0]*dt

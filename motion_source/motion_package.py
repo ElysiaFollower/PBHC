@@ -58,6 +58,8 @@ def merge_motion_files(pkl_paths, failed_list_path=None, min_len=None, max_len=N
         if not isinstance(data, dict):
             raise ValueError(f"{pkl_path} does not contain a dict")
 
+        file_stem = pkl_path.stem
+
         for k, motion in data.items():
             if not isinstance(motion, dict) or "dof" not in motion:
                 print(f"Skipping key '{k}' in {pkl_path}: missing 'dof'")
@@ -72,7 +74,7 @@ def merge_motion_files(pkl_paths, failed_list_path=None, min_len=None, max_len=N
             #     print(f"Skipping failed motion file: {pkl_path.name}")
             #     continue
 
-            new_key = k 
+            new_key = file_stem
 
             key_sources[new_key] = str(k)
             merged[new_key] = motion
@@ -122,7 +124,7 @@ def main():
     source_txt_path = folder_path / "merged_motion_keys.txt"
     with open(source_txt_path, "w") as f:
         for i, (key, path) in enumerate(key_sources.items()):
-            f.write(f"{i}\t{path}\n")
+            f.write(f"{i}\t{key}\n")
 
     print(f"Merged motion saved to: {output_path.resolve()}")
     print(f"Key source mapping saved to: {source_txt_path.resolve()}")
