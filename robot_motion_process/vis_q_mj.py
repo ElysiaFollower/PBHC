@@ -21,6 +21,11 @@ from scipy.spatial.transform import Rotation as sRot
 import joblib
 import hydra
 from omegaconf import DictConfig, OmegaConf
+import pathlib
+
+if os.name == 'nt':  # 只有在 Windows 下才执行
+    temp = pathlib.PosixPath
+    pathlib.PosixPath = pathlib.WindowsPath
 
 from humanoidverse.utils.motion_lib.torch_humanoid_batch import Humanoid_Batch
 

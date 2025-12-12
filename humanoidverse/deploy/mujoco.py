@@ -12,6 +12,7 @@ from pathlib import Path
 import torch
 from humanoidverse.deploy import URCIRobot
 from scipy.spatial.transform import Rotation as R
+from scipy.spatial.transform import Rotation as sRot
 import logging
 from utils.config_utils import *  # noqa: E402, F403
 # add argparse arguments
@@ -160,6 +161,61 @@ class ViewerPlugin:
                 elif key >= 48 and key <= 57:
                     # 0-9 ,控制 策略切换
                     self._ref_pid = key-48
+                elif key == glfw.KEY_N:
+                    # 切换到下一个动作
+                    if self.motion_lib is not None:
+                        # 获取动作总数 
+                        if hasattr(self.motion_lib, '_num_unique_motions'):
+                            total_motions = self.motion_lib._num_unique_motions
+                        else:
+                            logger.warning("_num_unique_motions not found; fallback to 1.")
+                            total_motions = 1 # 保底
+                            
+                        # 计算下一个动作 ID
+                        self.cur_motion_id = (self.cur_motion_id + 1) % total_motions
+                        logger.info(f"Loading Motion ID: {self.cur_motion_id} / {total_motions}")
+                        
+                        # [关键点] 计算机器人当前的朝向 (Yaw)
+                        # 我们希望新动作加载进来时，是顺着机器人当前朝向的
+                        # MuJoCo 的四元数是 [w, x, y, z]
+                        curr_quat_wxyz = self.quat # 假设 self.quat 是实时更新的
+                        curr_quat_xyzw = curr_quat_wxyz[[1, 2, 3, 0]]
+                        
+                        # 计算当前的 Yaw 角度
+                        r = sRot.from_quat(curr_quat_xyzw)
+                        yaw = r.as_euler('xyz')[2]
+                        
+                        # 构造一个新的四元数作为 target_heading (绕Z轴旋转 yaw)
+                        target_quat = sRot.from_euler('z', yaw).as_quat() # xyzw
+                        
+                        # [热重载] 加载新动作，并应用朝向对齐
+                        # 注意：这里我们假设 load_motions 支持 target_heading 参数
+                        self.motion_lib.load_motions(
+                            random_sample=False, 
+                            start_idx=self.cur_motion_id,
+                            target_heading=target_quat # 告诉MotionLib把动作转到这个方向
+                        )
+                        
+                        # 仅重置计时器，不重置物理状态
+                        # 不调用 self.Reset() 
+                        self.timer = 0 
+                        
+                        # 如果父类有其他计数器也要清零
+                        if hasattr(self, 'motion_times'): self.motion_times[:] = 0
+                        if hasattr(self, '_kick_motion_res_counter'): self._kick_motion_res_counter = -1
+                        
+                        # 从 motion_lib 获取当前动作的真实时长 (秒)
+                        # 注意：get_motion_length 通常返回 Tensor，需要转 float
+                        real_len = self.motion_lib.get_motion_length(0)
+                        if hasattr(real_len, 'item'):
+                            real_len = real_len.item()
+                        
+                        # 覆盖父类的 motion_len
+                        self.motion_len = real_len  + 10 #等待10s没反应就复位了
+                        
+                        logger.info("Transition applied: Motion reloaded aligned to current heading.")
+                    else:
+                        logger.warning("No motion_lib found, cannot switch motion.")
                 else:
                     print('Press key: ',key)
                 
@@ -315,13 +371,53 @@ class MujocoRobot(URCIRobot, ViewerPlugin):
 
 
     def _reset(self):
-        self.data.qpos[:3] = np.array(self.cfg.robot.init_state.pos)
-        self.data.qpos[3:7] = np.array(self.cfg.robot.init_state.rot)[[3,0,1,2]] # XYZW to WXYZ
-        # self.data.qpos[3:7] = np.array([0,0,0.7184,-0.6956])[[3,0,1,2]]  #DEBUG: init quat of JingjiTaiji
-        # self.data.qpos[3:7] = np.array([0,0,0.7455,-0.6665])[[3,0,1,2]]  #DEBUG: init quat of NewTaiji
-        # self.data.qpos[3:7] = np.array([0,0,0.6894,0.7244])[[3,0,1,2]]  #DEBUG: init quat of Shaolinquan
-        self.data.qpos[7:] = self.dof_init_pose
-        self.data.qvel[:]   = 0
+        # 尝试从 MotionLib 初始化状态
+        initialized_from_motion = False
+        if hasattr(self, 'motion_lib') and self.motion_lib is not None:
+            try:
+                # 获取第 cur_motion_id 个动作，在时间 0 的状态
+                motion_ids = torch.tensor([self.cur_motion_id], dtype=torch.long)
+                motion_times = torch.tensor([0.0], dtype=torch.float32)
+                
+                # 调用 MotionLib 获取状态
+                root_res = self.motion_lib.get_motion_state(motion_ids, motion_times)
+                
+                # 数据转换: Torch -> Numpy
+                def to_np(x): return x.detach().cpu().numpy()[0]
+                
+                root_pos = to_np(root_res["root_pos"])
+                root_rot = to_np(root_res["root_rot"]) # XYZW
+                dof_pos = to_np(root_res["dof_pos"])
+                dof_vel = to_np(root_res["dof_vel"])
+                
+                # 应用到 MuJoCo data
+                self.data.qpos[:3] = root_pos
+                # MuJoCo 使用 WXYZ，MotionLib 输出通常是 XYZW
+                # 需要根据你的具体 MotionLib 输出确认。
+                # 参照原本代码: self.data.qpos[3:7] = np.array(...)[[3,0,1,2]] 说明 MuJoCo 需要 WXYZ
+                # 假设 root_rot 是 XYZW:
+                self.data.qpos[3] = root_rot[3] # W
+                self.data.qpos[4:7] = root_rot[0:3] # XYZ
+                
+                self.data.qpos[7:] = dof_pos
+                self.data.qvel[:] = 0 # 或者使用 dof_vel
+                
+                logger.info(f"Reset robot to start of Motion ID {self.cur_motion_id}")
+                initialized_from_motion = True
+            except Exception as e:
+                logger.error(f"Failed to reset from motion lib: {e}")
+                initialized_from_motion = False
+                
+        if not initialized_from_motion:
+            logger.info("Resetting from Config (Fixed State)")
+            self.data.qpos[:3] = np.array(self.cfg.robot.init_state.pos)
+            self.data.qpos[3:7] = np.array(self.cfg.robot.init_state.rot)[[3,0,1,2]] # XYZW to WXYZ
+            # self.data.qpos[3:7] = np.array([0,0,0.7184,-0.6956])[[3,0,1,2]]  #DEBUG: init quat of JingjiTaiji
+            # self.data.qpos[3:7] = np.array([0,0,0.7455,-0.6665])[[3,0,1,2]]  #DEBUG: init quat of NewTaiji
+            # self.data.qpos[3:7] = np.array([0,0,0.6894,0.7244])[[3,0,1,2]]  #DEBUG: init quat of Shaolinquan
+            self.data.qpos[7:] = self.dof_init_pose
+            self.data.qvel[:]   = 0
+            
         self.cmd = np.array(self.cfg.deploy.defcmd)
         
         if self.RAND_IMU:

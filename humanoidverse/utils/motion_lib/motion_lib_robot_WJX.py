@@ -148,7 +148,7 @@ class MotionLibBase():
                      start_idx=0, 
                      max_len=-1, 
                      target_heading = None):
-        assert target_heading is None, "Not Allowed to use target_heading!"
+        #assert target_heading is None, "Not Allowed to use target_heading!"
         # import ipdb; ipdb.set_trace()
 
         class FakeCat:
@@ -199,10 +199,9 @@ class MotionLibBase():
         logger.info(f"Sampling motion: {sample_idxes[:5]}, ....")
         # logger.info(f"Current motion keys: {self.curr_motion_keys[:5]}, ....")
 
-        assert (sample_idxes==0).all(), "Not Allowed to load more than one motion!"
-        
-        motion_data_list = [self._motion_data_list[0]]
-        # motion_data_list = self._motion_data_list[sample_idxes.cpu().numpy()]        
+        #assert (sample_idxes==0).all(), "Not Allowed to load more than one motion!"
+        #motion_data_list = [self._motion_data_list[0]]
+        motion_data_list = self._motion_data_list[sample_idxes.cpu().numpy()]        
         res_acc_single = self.load_motion_with_skeleton(motion_data_list, self.fix_height, target_heading, max_len)
         res_acc = {i: (res_acc_single[0]) for i in range((num_motion_to_load))}
 

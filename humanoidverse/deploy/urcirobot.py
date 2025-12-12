@@ -98,6 +98,8 @@ class URCIRobot:
         self.key_body_id = [4, 6, 10, 12, 19, 23, 24, 25, 26]
         self.map_dof_to_scale()
         
+        self.cur_motion_id = 0 #当前动作id
+        
     def map_dof_to_scale(self):
         if isinstance(self.action_scale, (dict, DictConfig)):
             scales = []

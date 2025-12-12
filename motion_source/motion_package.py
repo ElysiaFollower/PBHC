@@ -7,6 +7,12 @@ from pathlib import Path
 import joblib
 import torch
 
+import pathlib
+import os
+if os.name == 'nt':  # 只有在 Windows 下才执行
+    temp = pathlib.PosixPath
+    pathlib.PosixPath = pathlib.WindowsPath
+
 
 def load_pkl(pkl_path):
     try:
