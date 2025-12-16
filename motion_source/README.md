@@ -20,7 +20,36 @@ AMASS motions do not need further processing in this step.
 
 ## Video
 
-We use [GVHMR](https://github.com/zju3dv/GVHMR) to extract motions from videos. Replace GVHMR's `demo.py` with our `demo.py` to generate an SMPL-format `.npz` file in GVHMR's output directory.
+We use [GVHMR](https://github.com/zju3dv/GVHMR) to extract motions from videos. GVHMR is included as a git submodule in this directory.
+
+### Setup GVHMR
+
+1. **Initialize and update the submodule** (if you just cloned this repository):
+```bash
+cd motion_source
+git submodule update --init --recursive
+```
+
+2. **Install GVHMR dependencies**:
+```bash
+cd GVHMR
+pip install -e .
+```
+
+3. **Replace GVHMR's demo.py** with our modified version:
+```bash
+# Our demo.py is already in motion_source/, which should be used instead of GVHMR/tools/demo/demo.py
+```
+
+### Usage
+
+Run the video extraction:
+```bash
+cd motion_source
+python demo.py --video <path_to_video> --output_root <output_directory>
+```
+
+This will generate an SMPL-format `.npz` file in GVHMR's output directory.
 
 ## LAFAN (Unitree)
 

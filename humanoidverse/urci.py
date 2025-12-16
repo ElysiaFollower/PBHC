@@ -26,6 +26,10 @@ from typing import Dict, Optional
 from humanoidverse.utils.config_utils import *  # noqa: E402, F403
 from loguru import logger
 
+import pathlib
+if os.name == 'nt':  # 只有在 Windows 下才执行
+    temp = pathlib.PosixPath
+    pathlib.PosixPath = pathlib.WindowsPath
 
 import onnxruntime as ort
 import numpy as np
