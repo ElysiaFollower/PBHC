@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import typer
 from scipy.spatial.transform import Rotation as sRot
+from scipy import signal
 import pickle
 from smpl_sim.smpllib.smpl_joint_names import (
     SMPL_BONE_ORDER_NAMES,
@@ -67,6 +68,37 @@ def EMA_smooth(trans, alpha=0.3):
         ema[i] = alpha * trans[i] + (1 - alpha) * ema[i-1]
     return ema
 
+def butterworth_filter(data, cutoff=10, fs=30, order=4):
+    """
+    零相位巴特沃斯低通滤波
+    
+    这是专业的动捕数据平滑函数，比 EMA 更强：
+    - 无相位滞后：通过正向和反向两次滤波，消除相位偏移
+    - 频率截断：精确切掉高频抖动，只保留人体运动的低频有效信息
+    
+    Args:
+        data: 输入数据 (numpy array)
+        cutoff: 截止频率 (Hz)，通常人体动作在 2-5Hz 之间
+               - 越小越平滑，但可能导致贴地不紧
+               - 越大贴得越紧，但抖动越多
+               - 推荐值：2.0-5.0
+        fs: 采样率 (FPS)，通常是 30
+        order: 滤波器阶数，通常 4 阶足够
+    
+    Returns:
+        y: 滤波后的数据
+    """
+    nyq = 0.5 * fs  # 奈奎斯特频率
+    normal_cutoff = cutoff / nyq
+    
+    # 设计滤波器
+    b, a = signal.butter(order, normal_cutoff, btype='low', analog=False)
+    
+    # 使用 filtfilt 进行零相位滤波 (forward-backward filtering)
+    y = signal.filtfilt(b, a, data, axis=0)
+    
+    return y
+
 def correct_motion(contact_mask, verts, trans):
     contact_indices = np.where(np.any(contact_mask != [0, 0], axis=1))[0]
     no_contact_indices = np.where(np.all(contact_mask == [0, 0], axis=1))[0]
@@ -81,41 +113,64 @@ def correct_motion(contact_mask, verts, trans):
     # trans = torch.from_numpy(moving_average(trans))
     return trans
 
-def correct_motion_force_ground(verts, trans, alpha=0.3, floor_offset=0.0):
+def correct_motion_force_ground(verts, trans, fps=30, floor_offset=0.0, cutoff=3.0):
     """
-    修正模式 'force': 强制每一帧的最低点贴地。
-    适用于没有跳跃、持续贴地但发生Z轴漂移的数据。
+    修正模式 'force': 强制每一帧的最低点贴地，使用零相位巴特沃斯滤波去噪。
+    
+    核心改进：使用巴特沃斯滤波器处理最低点轨迹，提取低频漂移趋势，忽略高频抖动。
+    这样既能让人物贴地，又不会引入脚部的抖动噪声。
+    
+    适用于没有跳跃、持续贴地但发生Z轴漂移的数据（如GVHMR提取的数据）。
     
     Args:
         verts: Tensor, shape [B, V, 3] - SMPL顶点位置
         trans: Tensor, shape [B, J, 3] - 关节全局位置
-        alpha: float - EMA平滑系数
+        fps: float - 采样率（帧率），通常是 30
         floor_offset: float - 地面高度偏移（通常为0）
+        cutoff: float - 巴特沃斯滤波器截止频率 (Hz)
+                  - 推荐值：3.0（平衡平滑度和贴地紧密度）
+                  - 如果仍有轻微浮动，可提高到 5.0
+                  - 如果抖动明显，可降低到 1.5-2.0
     
     Returns:
         trans_corrected: Tensor - 修正后的关节位置
     """
-    # 1. 获取每一帧所有顶点的最低 Z 值 [Batch, 1]
+    # 1. 获取每一帧所有顶点的最低 Z 值 [Batch]
+    # 这是原始的、充满抖动的"脚底板高度曲线"
     min_z, _ = torch.min(verts[:, :, 2], dim=1)
+    min_z_np = min_z.cpu().numpy()
     
-    # 2. 计算需要下降的偏移量
-    # 我们希望 min_z 变为 floor_offset (通常是0)
-    # offset = current_z - target_z
-    offset = min_z - floor_offset
+    # 2. 核心改进：使用巴特沃斯滤波处理最低点轨迹
+    # 我们假设 Z 轴漂移是缓慢变化的，所以用极低的截止频率（例如 2Hz - 5Hz）
+    # 这样可以忽略单帧的脚部抖动，只保留"整体是不是飘起来了"这个信息
+    smooth_min_z = butterworth_filter(min_z_np, cutoff=cutoff, fs=fps, order=4)
     
-    # 3. 平滑偏移量 (使用现有的 EMA_smooth)
-    # 转为 Numpy 进行平滑处理
-    offset_np = offset.cpu().numpy()
-    offset_smooth = EMA_smooth(offset_np, alpha=alpha)
+    # 3. 计算偏移量
+    # 我们减去的是平滑后的漂移量
+    offset = smooth_min_z - floor_offset
     
     # 4. 应用修正
-    # trans 是 Tensor, shape [B, J, 3]
-    # 我们只修改 Z 轴
-    # 注意：这里需要 clone 防止原地修改导致的问题
     trans_corrected = trans.clone()
-    offset_tensor = torch.from_numpy(offset_smooth).to(trans.device)
+    offset_tensor = torch.from_numpy(offset).to(trans.device).float()
+    
     # offset_tensor 是 [B]，需要 unsqueeze 到 [B, 1] 然后广播到所有关节
     trans_corrected[:, :, 2] -= offset_tensor.unsqueeze(1)
+    
+    # 5. (可选) 二次修正：防止穿模
+    # 因为滤波可能会导致某些帧修正量不足，脚插入地下。
+    # 这里做一个简单的 Clip，如果修正后脚还在地下，就硬性提上来（仅针对穿模的情况）
+    # 注意：这一步是可选的，如果追求极致平滑可以不要，如果追求物理准确必须加
+    with torch.no_grad():
+        # 重新计算修正后的最低点（考虑偏移后的顶点位置）
+        corrected_verts_z = verts[:, :, 2] - offset_tensor.unsqueeze(1)
+        current_min_z, _ = torch.min(corrected_verts_z, dim=1)
+        penetration = current_min_z.cpu().numpy()
+        
+        # 只有当 penetration < 0 (穿模) 时，才需要额外的补偿
+        extra_fix = np.clip(penetration, -np.inf, 0)
+        # 因为 penetration 是负的，我们需要减去这个负值（即加上）
+        if np.any(extra_fix < 0):
+            trans_corrected[:, :, 2] -= torch.from_numpy(extra_fix).to(trans.device).unsqueeze(1)
     
     return trans_corrected
 
@@ -431,13 +486,14 @@ def main(
                             )
                         
                         elif correct_mode == "force":
-                            print("Correcting motion using 'force' mode (geometric grounding)...")
-                            # 新的逻辑：强制贴地
+                            print("Correcting motion using 'force' mode (Butterworth Smooth)...")
+                            # 新的逻辑：强制贴地，使用零相位巴特沃斯滤波去噪
                             correct_global_trans = correct_motion_force_ground(
                                 origin_verts[::skip],
                                 global_trans[::skip],
-                                alpha=0.2,       # 平滑系数，根据抖动情况调整
-                                floor_offset=0.0 # 地面高度，通常为0
+                                fps=fps,        # 传入当前视频的 FPS (通常是30)
+                                floor_offset=0.0, # 地面高度，通常为0
+                                cutoff=3.0     # 截止频率，推荐值3.0，可根据需要调整
                             )
                         
                         else:

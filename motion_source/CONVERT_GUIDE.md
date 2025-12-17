@@ -221,7 +221,11 @@ python mink_retarget/convert_fit_motion.py ../test_motion_data \
 - `--humanoid-mjcf-path`: SMPL人形模型的MJCF文件路径（相对于项目根目录，必需）
 - `--correct`: **重要！**启用运动修正，确保机器人脚部贴地，避免浮空问题（强烈推荐使用）
 - `--correct-mode`: 修正模式，可选值：
-  - `"force"`（默认）：强制贴地模式，适用于GVHMR等容易产生Z轴漂移的数据，强制每一帧的最低点贴地
+  - `"force"`（默认）：强制贴地模式，使用零相位巴特沃斯滤波器去噪
+    - 适用于GVHMR等容易产生Z轴漂移的数据
+    - 无相位滞后，动作与视频同步
+    - 强去噪能力，精确切掉高频抖动（>3Hz）
+    - 可调节 `cutoff` 参数（推荐3.0）控制平滑度 vs 贴地紧密度
   - `"contact"`：接触检测模式，基于脚部速度和高度检测接触状态，适用于包含跳跃动作的高质量动捕数据
 
 **输出**：
@@ -407,28 +411,64 @@ def correct_motion(contact_mask, verts, trans):
     return trans
 ```
 
-**3. "force" 模式强制贴地函数**（```84:123:smpl_retarget/mink_retarget/convert_fit_motion.py```）：
+**3. 巴特沃斯滤波器工具函数**（```69:100:smpl_retarget/mink_retarget/convert_fit_motion.py```）：
 ```python
-def correct_motion_force_ground(verts, trans, alpha=0.3, floor_offset=0.0):
+def butterworth_filter(data, cutoff=10, fs=30, order=4):
     """
-    修正模式 'force': 强制每一帧的最低点贴地。
-    适用于没有跳跃、持续贴地但发生Z轴漂移的数据。
+    零相位巴特沃斯低通滤波
+    
+    这是专业的动捕数据平滑函数，比 EMA 更强：
+    - 无相位滞后：通过正向和反向两次滤波，消除相位偏移
+    - 频率截断：精确切掉高频抖动，只保留人体运动的低频有效信息
+    """
+    nyq = 0.5 * fs  # 奈奎斯特频率
+    normal_cutoff = cutoff / nyq
+    
+    # 设计滤波器
+    b, a = signal.butter(order, normal_cutoff, btype='low', analog=False)
+    
+    # 使用 filtfilt 进行零相位滤波 (forward-backward filtering)
+    y = signal.filtfilt(b, a, data, axis=0)
+    
+    return y
+```
+
+**4. "force" 模式强制贴地函数**（```116:177:smpl_retarget/mink_retarget/convert_fit_motion.py```）：
+```python
+def correct_motion_force_ground(verts, trans, fps=30, floor_offset=0.0, cutoff=3.0):
+    """
+    修正模式 'force': 强制每一帧的最低点贴地，使用零相位巴特沃斯滤波去噪。
+    
+    核心改进：使用巴特沃斯滤波器处理最低点轨迹，提取低频漂移趋势，忽略高频抖动。
+    这样既能让人物贴地，又不会引入脚部的抖动噪声。
     """
     # 1. 获取每一帧所有顶点的最低 Z 值 [Batch]
+    # 这是原始的、充满抖动的"脚底板高度曲线"
     min_z, _ = torch.min(verts[:, :, 2], dim=1)
+    min_z_np = min_z.cpu().numpy()
     
-    # 2. 计算需要下降的偏移量
-    # offset = current_z - target_z
-    offset = min_z - floor_offset
+    # 2. 核心改进：使用巴特沃斯滤波处理最低点轨迹
+    # 我们假设 Z 轴漂移是缓慢变化的，所以用极低的截止频率（例如 2Hz - 5Hz）
+    # 这样可以忽略单帧的脚部抖动，只保留"整体是不是飘起来了"这个信息
+    smooth_min_z = butterworth_filter(min_z_np, cutoff=cutoff, fs=fps, order=4)
     
-    # 3. 平滑偏移量 (使用EMA平滑)
-    offset_np = offset.cpu().numpy()
-    offset_smooth = EMA_smooth(offset_np, alpha=alpha)
+    # 3. 计算偏移量
+    offset = smooth_min_z - floor_offset
     
     # 4. 应用修正：从所有关节的z坐标中减去偏移
     trans_corrected = trans.clone()
-    offset_tensor = torch.from_numpy(offset_smooth).to(trans.device)
+    offset_tensor = torch.from_numpy(offset).to(trans.device).float()
     trans_corrected[:, :, 2] -= offset_tensor.unsqueeze(1)
+    
+    # 5. 二次修正：防止穿模（可选）
+    # 如果修正后脚还在地下，就硬性提上来
+    with torch.no_grad():
+        corrected_verts_z = verts[:, :, 2] - offset_tensor.unsqueeze(1)
+        current_min_z, _ = torch.min(corrected_verts_z, dim=1)
+        penetration = current_min_z.cpu().numpy()
+        extra_fix = np.clip(penetration, -np.inf, 0)
+        if np.any(extra_fix < 0):
+            trans_corrected[:, :, 2] -= torch.from_numpy(extra_fix).to(trans.device).unsqueeze(1)
     
     return trans_corrected
 ```
@@ -449,12 +489,13 @@ if correct:
         )
     
     elif correct_mode == "force":
-        # "force" 模式：强制贴地（推荐）
+        # "force" 模式：强制贴地，使用零相位巴特沃斯滤波去噪（推荐）
         correct_global_trans = correct_motion_force_ground(
             origin_verts[::skip],
             global_trans[::skip],
-            alpha=0.2,       # 平滑系数
-            floor_offset=0.0 # 地面高度
+            fps=fps,        # 传入当前视频的 FPS (通常是30)
+            floor_offset=0.0, # 地面高度，通常为0
+            cutoff=3.0     # 截止频率，推荐值3.0，可根据需要调整
         )
 else:
     # 不修正，直接使用原始数据（可能导致浮空）
@@ -462,9 +503,28 @@ else:
 ```
 
 **修正原理**：
+
+**"contact" 模式**：
 - **有接触帧**：计算SMPL模型顶点的最低z坐标，将其作为地面高度，从所有关节的z坐标中减去这个偏移，使最低点（通常是脚部）贴地
 - **无接触帧**：使用前一帧的偏移值，保持高度连续性，避免突然跳跃
 - **平滑处理**：使用指数移动平均（EMA，alpha=0.3）平滑z坐标变化，使运动更自然
+
+**"force" 模式**（使用零相位巴特沃斯滤波）：
+- **核心改进**：使用专业的零相位巴特沃斯滤波器处理最低点轨迹，提取低频漂移趋势，忽略高频抖动
+- **技术优势**：
+  - **无相位滞后**：零相位滤波确保动作与视频同步，不会"慢半拍"
+  - **强去噪能力**：精确切掉高频抖动（>3Hz），只保留人体运动的低频有效信息
+  - **可调节参数**：`cutoff` 参数控制平滑度 vs 贴地紧密度
+    - 推荐值：3.0（平衡平滑度和贴地紧密度）
+    - 如果仍有轻微浮动，可提高到 5.0
+    - 如果抖动明显，可降低到 1.5-2.0
+- **技术对比**：
+  | 特性 | EMA 方法 | Butterworth 方法 |
+  |------|---------|-----------------|
+  | 原理 | 当前帧参考上一帧的加权平均 | 频域信号处理，切除高频分量 |
+  | 相位/延迟 | 有明显的滞后（机器人反应慢） | 零相位（动作与视频同步） |
+  | 抗抖动 | 差（为了减少滞后必须减小力度） | 极强（可以设置很低的截止频率） |
+  | 适用场景 | 简单的平滑 | 专业的动捕数据清洗 |
 
 ### 4. 为什么必须在GVHMR目录运行？
 - `demo.py` 中有硬编码的相对路径，如 `"hmr4d/utils/body_model/smplx2smpl_sparse.pt"`，这些路径是相对于 GVHMR 目录的
