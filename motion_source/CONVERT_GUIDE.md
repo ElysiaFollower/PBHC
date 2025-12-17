@@ -2,6 +2,36 @@
 
 本文档说明如何使用GVHMR从视频提取人体运动数据，并转换为机器人可用的PKL格式。
 
+
+## 快速参考（gangster.mp4示例）
+
+```bash
+# 1. 视频提取（在GVHMR目录）
+cd motion_source/GVHMR
+conda activate gvhmr
+python ../demo.py --video ../videos/gangster.mp4 --output_root outputs/gangster --gpu 0
+
+# 2. 准备数据（在项目根目录）
+cd ../../  # 从 motion_source/GVHMR 回到项目根目录
+mkdir -p test_motion_data/video_motion
+cp motion_source/GVHMR/outputs/gangster/gangster/smpl.npz test_motion_data/video_motion/gangster.npz
+
+# 3. 重定向（在 smpl_retarget 目录）
+cd smpl_retarget
+python mink_retarget/convert_fit_motion.py ../test_motion_data \
+    --robot-type g1 \
+    --humanoid-type smpl \
+    --force-retarget \
+    --humanoid-mjcf-path ../description/robots/g1/smpl_humanoid.xml \
+    --correct \
+    --correct-mode force  # 可选: "force" (强制贴地，推荐) 或 "contact" (基于接触检测)
+   
+# 4. 结果位置
+# PKL文件：smpl_retarget/retargeted_motion_data/mink/gangster.pkl
+```
+
+
+
 ## 为什么使用 Mink Retarget 而不是 PHC Retarget？
 
 本项目使用 **Mink Retarget** 方法进行运动重定向，而不是 PHC Retarget。主要理由如下：
@@ -40,32 +70,7 @@
 
 可以考虑使用 PHC Retarget。但通常情况下，Mink Retarget 已经能够提供足够好的结果。
 
-## 快速参考（gangster.mp4示例）
 
-```bash
-# 1. 视频提取（在GVHMR目录）
-cd motion_source/GVHMR
-conda activate gvhmr
-python ../demo.py --video ../videos/gangster.mp4 --output_root outputs/gangster
-
-# 2. 准备数据（在项目根目录）
-cd ../../  # 从 motion_source/GVHMR 回到项目根目录
-mkdir -p test_motion_data/video_motion
-cp motion_source/GVHMR/outputs/gangster/gangster/smpl.npz test_motion_data/video_motion/gangster.npz
-
-# 3. 重定向（在 smpl_retarget 目录）
-cd smpl_retarget
-python mink_retarget/convert_fit_motion.py ../test_motion_data \
-    --robot-type g1 \
-    --humanoid-type smpl \
-    --force-retarget \
-    --humanoid-mjcf-path ../description/robots/g1/smpl_humanoid.xml \
-    --correct \
-    --correct-mode force  # 可选: "force" (强制贴地，推荐) 或 "contact" (基于接触检测)
-   
-# 4. 结果位置
-# PKL文件：smpl_retarget/retargeted_motion_data/mink/gangster.pkl
-```
 
 ## 前置条件
 
@@ -94,12 +99,13 @@ python mink_retarget/convert_fit_motion.py ../test_motion_data \
 ```bash
 cd motion_source/GVHMR
 conda activate gvhmr
-python ../demo.py --video ../videos/gangster.mp4 --output_root outputs/gangster
+python ../demo.py --video ../videos/gangster.mp4 --output_root outputs/gangster --gpu 0
 ```
 
 **参数说明**：
 - `--video`: 输入视频路径（相对于GVHMR目录，所以使用 `../videos/gangster.mp4`）
 - `--output_root`: 输出目录（可选，默认为 `outputs/demo`）
+- `--gpu`: GPU设备ID（可选，默认为0）。如果有多张显卡，可以指定不同的GPU来并行处理多条视频
 
 **输出**：
 - 输出目录：`motion_source/GVHMR/outputs/gangster/gangster/`（或 `motion_source/GVHMR/outputs/demo/gangster/`）
@@ -247,7 +253,7 @@ python robot_motion_process/motion_readpkl.py smpl_retarget/retargeted_motion_da
 # ===== 步骤1：视频提取 =====
 cd motion_source/GVHMR
 conda activate gvhmr  # 确保在正确的环境中
-python ../demo.py --video ../videos/gangster.mp4 --output_root outputs/gangster
+python ../demo.py --video ../videos/gangster.mp4 --output_root outputs/gangster --gpu 0
 
 # 检查输出（在GVHMR目录下）
 ls outputs/gangster/gangster/smpl.npz  # 或 outputs/demo/gangster/smpl.npz
@@ -526,7 +532,72 @@ else:
   | 抗抖动 | 差（为了减少滞后必须减小力度） | 极强（可以设置很低的截止频率） |
   | 适用场景 | 简单的平滑 | 专业的动捕数据清洗 |
 
-### 4. 为什么必须在GVHMR目录运行？
+### 5. GPU选择与并行处理
+
+**指定GPU设备**：
+- 使用 `--gpu` 参数指定GPU设备ID（默认：0）
+- 示例：`--gpu 0` 使用第一张显卡，`--gpu 1` 使用第二张显卡
+
+**并行处理多条视频**：
+如果您有多张显卡，可以在不同的GPU上并行处理多条视频：
+
+**方法1：使用后台进程（Windows PowerShell）**
+```powershell
+# 在GPU 0上处理视频1
+Start-Process python -ArgumentList "../demo.py --video ../videos/video1.mp4 --output_root outputs/video1 --gpu 0" -NoNewWindow
+
+# 在GPU 1上处理视频2
+Start-Process python -ArgumentList "../demo.py --video ../videos/video2.mp4 --output_root outputs/video2 --gpu 1" -NoNewWindow
+```
+
+**方法2：创建批处理脚本**
+创建 `process_parallel.bat` 文件：
+```batch
+@echo off
+cd motion_source/GVHMR
+conda activate gvhmr
+start "GPU0" cmd /c "python ../demo.py --video ../videos/gangster.mp4 --output_root outputs/gangster --gpu 0"
+start "GPU1" cmd /c "python ../demo.py --video ../videos/video2.mp4 --output_root outputs/video2 --gpu 1"
+```
+
+**方法3：使用Python脚本并行处理**
+创建 `run_parallel.py` 脚本：
+```python
+import subprocess
+import sys
+import os
+
+# 切换到GVHMR目录
+os.chdir("motion_source/GVHMR")
+
+videos = [
+    ("../videos/gangster.mp4", "outputs/gangster", 0),
+    ("../videos/video2.mp4", "outputs/video2", 1),
+    ("../videos/video3.mp4", "outputs/video3", 2),
+]
+
+processes = []
+for video, output, gpu in videos:
+    cmd = [
+        sys.executable, "../demo.py",
+        "--video", video,
+        "--output_root", output,
+        "--gpu", str(gpu)
+    ]
+    p = subprocess.Popen(cmd)
+    processes.append(p)
+
+# 等待所有进程完成
+for p in processes:
+    p.wait()
+```
+
+**注意事项**：
+- 确保指定的GPU ID存在（例如，如果有2张显卡，只能使用 `--gpu 0` 和 `--gpu 1`）
+- 并行处理时注意每张GPU的显存使用情况
+- 建议先测试单条视频的处理时间，以便合理分配任务
+
+### 6. 为什么必须在GVHMR目录运行？
 - `demo.py` 中有硬编码的相对路径，如 `"hmr4d/utils/body_model/smplx2smpl_sparse.pt"`，这些路径是相对于 GVHMR 目录的
 - 配置文件 `demo.yaml` 中的路径（如 `inputs/checkpoints/...`）也是相对于 GVHMR 目录的
 - 如果不在 GVHMR 目录运行，会找不到这些文件和模型权重
