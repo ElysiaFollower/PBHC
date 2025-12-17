@@ -249,6 +249,161 @@ python humanoidverse/train_agent.py [参数]
 - `checkpoint` (默认: null)
   - 检查点路径（用于继续训练）
   - 示例: `checkpoint=logs/MotionTracking/.../model_10000.pt`
+  - 详细说明见 [Checkpoint 加载机制](#checkpoint-加载机制) 章节
+
+---
+
+## Checkpoint 加载机制
+
+### Checkpoint 包含的内容
+
+当使用 `checkpoint` 参数加载检查点时，系统会加载以下内容：
+
+1. **模型权重**
+   - Actor 网络权重（策略网络）
+   - Critic 网络权重（价值网络）
+   - 这是必须加载的核心内容
+
+2. **优化器状态**（如果 `algo.config.load_optimizer=True`，默认启用）
+   - Actor 优化器状态（包含动量、Adam 的 m/v 等）
+   - Critic 优化器状态
+   - 学习率（从优化器状态中提取）
+
+3. **训练状态**
+   - 当前迭代次数（`iter`）
+   - 训练信息（`infos`，如果保存了的话）
+
+### 加载机制的影响
+
+#### 1. 继续训练相同任务
+
+**场景：** 训练中断后继续训练相同的动作数据
+
+**推荐设置：**
+- `checkpoint=<path>` - 加载检查点
+- `algo.config.load_optimizer=True`（默认）- 保留优化器状态
+- 保持相同的 `robot.motion.motion_file`
+
+**影响：**
+- ✅ 训练会从保存的迭代次数继续
+- ✅ 优化器的自适应状态（如 Adam 的动量）会保留，有助于稳定训练
+- ✅ 学习率会从检查点恢复
+
+**示例：**
+```bash
+python humanoidverse/train_agent.py \
++simulator=isaacgym +exp=motion_tracking +terrain=terrain_locomotion_plane \
+project_name=MotionTracking num_envs=4096 \
++obs=motion_tracking/main \
++robot=g1/g1_23dof_lock_wrist \
++domain_rand=main \
++rewards=motion_tracking/main \
+experiment_name=continue_training \
+robot.motion.motion_file="example/motion_data/Horse-stance_pose.pkl" \
+seed=1 \
++device=cuda:0 \
+checkpoint=logs/MotionTracking/.../model_10000.pt \
+algo.config.load_optimizer=True
+```
+
+#### 2. 在原有模型基础上训练新动作（迁移学习）
+
+**场景：** 使用已训练的模型作为起点，训练新的动作数据
+
+**推荐设置：**
+- `checkpoint=<path>` - 加载检查点
+- `algo.config.load_optimizer=False` - **重置优化器状态**
+- 使用新的 `robot.motion.motion_file`
+
+**原因：**
+- 优化器状态（如 Adam 的 m/v 统计量）是针对之前任务的梯度历史
+- 新任务的数据分布可能不同，保留旧的优化器状态可能导致：
+  - 学习率调整不当
+  - 梯度更新方向偏差
+  - 训练不稳定
+
+**影响：**
+- ✅ 模型权重会保留（迁移学习的基础）
+- ✅ 优化器会重新初始化，使用配置文件中的初始学习率
+- ✅ 迭代次数会重置为 0（或从配置的起始值开始）
+
+**示例：**
+```bash
+python humanoidverse/train_agent.py \
++simulator=isaacgym +exp=motion_tracking +terrain=terrain_locomotion_plane \
+project_name=MotionTracking num_envs=4096 \
++obs=motion_tracking/main \
++robot=g1/g1_23dof_lock_wrist \
++domain_rand=main \
++rewards=motion_tracking/main \
+experiment_name=transfer_learning \
+robot.motion.motion_file="example/motion_data/New_motion.pkl" \
+seed=1 \
++device=cuda:0 \
+checkpoint=logs/MotionTracking/.../model_50000.pt \
+algo.config.load_optimizer=False \
+algo.config.num_learning_iterations=50000
+```
+
+#### 3. 仅加载模型权重（不加载优化器）
+
+**场景：** 需要从检查点恢复模型，但希望使用新的优化器设置
+
+**设置：**
+- `checkpoint=<path>` - 加载检查点
+- `algo.config.load_optimizer=False` - 不加载优化器状态
+- 可以同时调整学习率等其他超参数
+
+**示例：**
+```bash
+python humanoidverse/train_agent.py \
++simulator=isaacgym +exp=motion_tracking +terrain=terrain_locomotion_plane \
+project_name=MotionTracking num_envs=4096 \
++obs=motion_tracking/main \
++robot=g1/g1_23dof_lock_wrist \
++domain_rand=main \
++rewards=motion_tracking/main \
+experiment_name=resume_with_new_lr \
+robot.motion.motion_file="example/motion_data/Horse-stance_pose.pkl" \
+seed=1 \
++device=cuda:0 \
+checkpoint=logs/MotionTracking/.../model_10000.pt \
+algo.config.load_optimizer=False \
+algo.config.learning_rate=5.e-4
+```
+
+### 控制优化器加载的参数
+
+- **`algo.config.load_optimizer`** (默认: `True`)
+  - `True`: 加载优化器状态（推荐用于继续训练相同任务）
+  - `False`: 不加载优化器状态，使用新的优化器（推荐用于迁移学习）
+
+**通过命令行设置：**
+```bash
+algo.config.load_optimizer=False
+```
+
+**通过配置文件设置：**
+编辑 `humanoidverse/config/algo/mh_ppo.yaml` 或 `ppo_mimic.yaml`：
+```yaml
+config:
+  load_optimizer: False  # 设置为 False 以重置优化器
+```
+
+### 注意事项
+
+1. **迭代次数重置**
+   - 如果 `load_optimizer=False`，迭代次数会从检查点加载，但优化器是新的
+   - 如果需要重置迭代计数，需要修改代码或使用新的 `experiment_name`
+
+2. **学习率**
+   - 如果 `load_optimizer=True`，学习率会从检查点恢复
+   - 如果 `load_optimizer=False`，学习率会使用配置文件中的初始值
+   - 可以通过 `algo.config.learning_rate` 或 `algo.config.actor_learning_rate`/`critic_learning_rate` 覆盖
+
+3. **模型兼容性**
+   - 确保检查点的模型结构与当前配置兼容
+   - 如果模型结构不同（如观察空间不同），加载可能会失败
 
 ---
 
@@ -584,6 +739,8 @@ checkpoint=logs/MotionTracking/.../model_10000.pt
 
 系统会自动加载检查点并继续训练。
 
+**详细说明：** 见 [Checkpoint 加载机制](#checkpoint-加载机制) 章节
+
 ### Q3: 训练速度很慢怎么办？
 
 **解决方案：**
@@ -637,6 +794,34 @@ checkpoint=logs/MotionTracking/.../model_10000.pt
 **解决方案：**
 - 默认保存在 `logs/{project_name}/{timestamp}-{experiment_name}-{log_task_name}-{robot_type}/`
 - 可以通过 `base_dir` 参数修改基础目录（默认 `logs`）
+
+### Q11: 在原有模型基础上训练新动作时，是否需要重置优化器状态？
+
+**解决方案：**
+**是的，强烈建议重置优化器状态。**
+
+**原因：**
+- 优化器状态（如 Adam 的动量统计量）是针对之前任务的梯度历史
+- 新动作的数据分布可能不同，保留旧的优化器状态可能导致训练不稳定
+
+**操作方法：**
+```bash
+checkpoint=<path to checkpoint> \
+algo.config.load_optimizer=False
+```
+
+**详细说明：** 见 [Checkpoint 加载机制](#checkpoint-加载机制) 章节中的"在原有模型基础上训练新动作"部分
+
+### Q12: Checkpoint 加载时都加载了什么内容？
+
+**解决方案：**
+Checkpoint 包含以下内容：
+1. **模型权重** - Actor 和 Critic 网络权重（必须加载）
+2. **优化器状态** - 如果 `load_optimizer=True`（默认），会加载优化器的动量、统计量等
+3. **学习率** - 从优化器状态中提取
+4. **迭代次数** - 训练会从该迭代次数继续
+
+**详细说明：** 见 [Checkpoint 加载机制](#checkpoint-加载机制) 章节
 
 ---
 

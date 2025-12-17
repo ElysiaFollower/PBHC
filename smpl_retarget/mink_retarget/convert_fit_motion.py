@@ -61,6 +61,48 @@ def count_pose_aa(motion):
     
     return pose_aa,dof_new
 
+def fix_flying_outliers(trans, fps=30.0, speed_threshold=10.0):
+    """
+    检测并修复瞬移异常。
+    
+    策略：如果两帧之间的速度超过 speed_threshold (m/s)，则强制保持在上一帧的位置。
+    这消除了物理模拟器无法处理的极高速度。
+    
+    Args:
+        trans: Numpy array [T, 3] (根节点位移)
+        fps: 数据的帧率
+        speed_threshold: 速度阈值，默认10m/s (人类极限冲刺速度)
+    
+    Returns:
+        fixed_trans: 修复后的位移数据
+    """
+    # 计算每帧允许的最大位移距离
+    dt = 1.0 / fps
+    max_dist_per_frame = speed_threshold * dt
+    
+    fixed_trans = trans.copy()
+    num_outliers = 0
+    
+    # 从第1帧开始遍历 (第0帧无法比较)
+    for i in range(1, len(fixed_trans)):
+        # 计算当前帧与"上一帧（可能是修正过的）"之间的距离
+        # 注意：这里只计算根节点的位移
+        curr_pos = fixed_trans[i]
+        prev_pos = fixed_trans[i-1]
+        
+        dist = np.linalg.norm(curr_pos - prev_pos)
+        
+        if dist > max_dist_per_frame:
+            # 检测到瞬移！
+            # 策略：Clamp (钳位) - 强制这一帧留在上一帧的位置
+            fixed_trans[i] = prev_pos
+            num_outliers += 1
+            
+    if num_outliers > 0:
+        print(f"Warning: Detected and fixed {num_outliers} flying outlier frames (Speed > {speed_threshold} m/s).")
+        
+    return fixed_trans
+
 def EMA_smooth(trans, alpha=0.3):
     ema = np.zeros_like(trans)
     ema[0] = trans[0]
@@ -184,7 +226,9 @@ def main(
     humanoid_mjcf_path: Optional[str] = "../description/robots/g1/smpl_humanoid.xml",
     force_retarget: bool = True,
     correct: bool = False,
-    correct_mode: str = "force"  # 可选 "contact" 或 "force"，默认 "force" 强制贴地
+    correct_mode: str = "force",  # 可选 "contact" 或 "force"，默认 "force" 强制贴地
+    fix_flying: bool = True,  # 默认开启异常修复
+    flying_threshold: float = 10.0  # 速度阈值，默认10m/s (人类极限冲刺速度)
 ):
     if robot_type is None:
         robot_type = humanoid_type
@@ -349,6 +393,16 @@ def main(
                             mocap_fr = motion_data["mocap_framerate"]
                         else:
                             mocap_fr = motion_data["mocap_frame_rate"]
+                    
+                    # ================= [新增] 异常数据修复 =================
+                    # 必须在转 tensor 之前，且在 correct_motion 之前执行
+                    if fix_flying:
+                        amass_trans = fix_flying_outliers(
+                            amass_trans, 
+                            fps=mocap_fr, 
+                            speed_threshold=flying_threshold
+                        )
+                    # ========================================================
                 elif filename.suffix == ".pkl" and "samp" in str(filename):
                     with open(filename, "rb") as f:
                         motion_data = pickle.load(
@@ -360,6 +414,16 @@ def main(
                     amass_pose = motion_data["pose_est_fullposes"]
                     amass_trans = motion_data["pose_est_trans"]
                     mocap_fr = motion_data["mocap_framerate"]
+                    
+                    # ================= [新增] 异常数据修复 =================
+                    # 必须在转 tensor 之前，且在 correct_motion 之前执行
+                    if fix_flying:
+                        amass_trans = fix_flying_outliers(
+                            amass_trans, 
+                            fps=mocap_fr, 
+                            speed_threshold=flying_threshold
+                        )
+                    # ========================================================
                 else:
                     print(f"Skipping {filename} as it is not a valid file")
                     continue

@@ -9,7 +9,7 @@
 # 1. 视频提取（在GVHMR目录）
 cd motion_source/GVHMR
 conda activate gvhmr
-python ../demo.py --video ../videos/gangster.mp4 --output_root outputs/gangster --gpu 0
+python ../demo.py --video ../videos/gangster.mp4 --output_root    outputs/gangster --gpu 0
 
 # 2. 准备数据（在项目根目录）
 cd ../../  # 从 motion_source/GVHMR 回到项目根目录
