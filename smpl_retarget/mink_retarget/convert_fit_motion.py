@@ -81,6 +81,44 @@ def correct_motion(contact_mask, verts, trans):
     # trans = torch.from_numpy(moving_average(trans))
     return trans
 
+def correct_motion_force_ground(verts, trans, alpha=0.3, floor_offset=0.0):
+    """
+    修正模式 'force': 强制每一帧的最低点贴地。
+    适用于没有跳跃、持续贴地但发生Z轴漂移的数据。
+    
+    Args:
+        verts: Tensor, shape [B, V, 3] - SMPL顶点位置
+        trans: Tensor, shape [B, J, 3] - 关节全局位置
+        alpha: float - EMA平滑系数
+        floor_offset: float - 地面高度偏移（通常为0）
+    
+    Returns:
+        trans_corrected: Tensor - 修正后的关节位置
+    """
+    # 1. 获取每一帧所有顶点的最低 Z 值 [Batch, 1]
+    min_z, _ = torch.min(verts[:, :, 2], dim=1)
+    
+    # 2. 计算需要下降的偏移量
+    # 我们希望 min_z 变为 floor_offset (通常是0)
+    # offset = current_z - target_z
+    offset = min_z - floor_offset
+    
+    # 3. 平滑偏移量 (使用现有的 EMA_smooth)
+    # 转为 Numpy 进行平滑处理
+    offset_np = offset.cpu().numpy()
+    offset_smooth = EMA_smooth(offset_np, alpha=alpha)
+    
+    # 4. 应用修正
+    # trans 是 Tensor, shape [B, J, 3]
+    # 我们只修改 Z 轴
+    # 注意：这里需要 clone 防止原地修改导致的问题
+    trans_corrected = trans.clone()
+    offset_tensor = torch.from_numpy(offset_smooth).to(trans.device)
+    # offset_tensor 是 [B]，需要 unsqueeze 到 [B, 1] 然后广播到所有关节
+    trans_corrected[:, :, 2] -= offset_tensor.unsqueeze(1)
+    
+    return trans_corrected
+
 def main(
     amass_root_dir: Path,
     robot_type: str = 'g1',
@@ -90,7 +128,8 @@ def main(
     upright_start: bool = True,  # By default, let's start upright (for consistency across all models).
     humanoid_mjcf_path: Optional[str] = "../description/robots/g1/smpl_humanoid.xml",
     force_retarget: bool = True,
-    correct: bool = False
+    correct: bool = False,
+    correct_mode: str = "force"  # 可选 "contact" 或 "force"，默认 "force" 强制贴地
 ):
     if robot_type is None:
         robot_type = humanoid_type
@@ -382,7 +421,27 @@ def main(
                     contact_mask = np.concatenate([feet_l,feet_r],axis=-1)
                     
                     if correct:
-                        correct_global_trans = correct_motion(contact_mask, origin_verts[::skip], global_trans[::skip])
+                        if correct_mode == "contact":
+                            print("Correcting motion using 'contact' mode (velocity threshold)...")
+                            # 原来的逻辑：依赖 contact_mask
+                            correct_global_trans = correct_motion(
+                                contact_mask, 
+                                origin_verts[::skip], 
+                                global_trans[::skip]
+                            )
+                        
+                        elif correct_mode == "force":
+                            print("Correcting motion using 'force' mode (geometric grounding)...")
+                            # 新的逻辑：强制贴地
+                            correct_global_trans = correct_motion_force_ground(
+                                origin_verts[::skip],
+                                global_trans[::skip],
+                                alpha=0.2,       # 平滑系数，根据抖动情况调整
+                                floor_offset=0.0 # 地面高度，通常为0
+                            )
+                        
+                        else:
+                            raise ValueError(f"Unknown correct_mode: {correct_mode}. Must be 'contact' or 'force'")
                     else:
                         correct_global_trans = global_trans[::skip]
 
