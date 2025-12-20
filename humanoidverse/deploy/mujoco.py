@@ -111,7 +111,8 @@ class ViewerPlugin:
     # TODO: visualize the motion keypoint in MujocoViewer
     
     is_recording = False
-    fps = 30
+    fps = 30  # 录屏目标帧率
+    _video_buffer_max_size = 1000  # buffer最大帧数，超过后写入临时文件
     
     def _make_viewer(self):
         ...
@@ -225,8 +226,18 @@ class ViewerPlugin:
         
         if self.is_recording:
             logger.info("Recording is True")
-            self.start_time = time.time()
+            # 初始化基于仿真步的录屏参数
+            # 这些参数会在MujocoRobot.__init__中设置
+            if not hasattr(self, '_sim_fps'):
+                # 如果还没有设置，使用默认值（会在MujocoRobot中覆盖）
+                self._sim_fps = 500
+            self._recording_frame_counter = 0  # 仿真步计数器
+            self._recording_frame_interval = max(1, int(self._sim_fps / self.fps))  # 采样间隔
+            logger.info(f"Recording: sim_fps={self._sim_fps}, target_fps={self.fps}, frame_interval={self._recording_frame_interval}")
+            
             self._video_buffer = []
+            self._video_temp_files = []  # 临时文件列表
+            self._video_saved = False  # 标记视频是否已保存，避免重复保存
             viewport = self.viewer.viewport
             self._frame_buffer = np.zeros((viewport.height, viewport.width, 3), dtype=np.uint8)
             self._frame_size = (viewport.height // self.macro_block_size * self.macro_block_size,  #
@@ -238,25 +249,110 @@ class ViewerPlugin:
             if self.viewer.is_alive:
                 self.viewer.render()
                 # self.viewer.sync()
-                if self.is_recording and (time.time() - self.start_time >= 1/self.fps):
-                    self.start_time = time.time()
-                    mujoco.mjr_readPixels(self._frame_buffer, None, self.viewer.viewport, self.viewer.ctx)
-                    # imageio.imwrite('frame.png', frame[::-1])
-                    # breakpoint()
-                    
-                    self._video_buffer.append(self._frame_buffer[::-1].copy()[:self._frame_size[0], :self._frame_size[1]])
+                if self.is_recording:
+                    # 基于仿真步的采样：每 _recording_frame_interval 个仿真步采样一帧
+                    self._recording_frame_counter += 1
+                    if self._recording_frame_counter >= self._recording_frame_interval:
+                        self._recording_frame_counter = 0
+                        
+                        mujoco.mjr_readPixels(self._frame_buffer, None, self.viewer.viewport, self.viewer.ctx)
+                        frame = self._frame_buffer[::-1].copy()[:self._frame_size[0], :self._frame_size[1]]
+                        
+                        self._video_buffer.append(frame)
+                        
+                        # 检查buffer大小，超过限制时写入临时文件
+                        if len(self._video_buffer) >= self._video_buffer_max_size:
+                            self._flush_video_buffer_to_temp_file()
             else:
                 if self.is_recording:
                     logger.info("Mujoco: Saving video ...")
-                    
-                    model_path:Path = self.cfg.checkpoint
-                    model_id = model_path.stem.replace('model_', 'ckpt_')
-                    video_path:Path = model_path.parent.parent / 'renderings' / model_id / f'video_{time.strftime("%Y%m%d_%H%M%S")}.mp4'
-                    video_path.parent.mkdir(parents=True, exist_ok=True)
-                    import imageio
-                    imageio.mimsave(video_path, self._video_buffer, fps=self.fps, macro_block_size=self.macro_block_size)
-                    logger.info(f"Video saved to {video_path}")
+                    self._save_video()
                 raise RobotExitException("Mujoco Robot Exit")
+    
+    def _flush_video_buffer_to_temp_file(self):
+        """将当前buffer写入临时文件，清空buffer"""
+        if len(self._video_buffer) == 0:
+            return
+        
+        import imageio
+        
+        # 创建临时文件
+        temp_dir = Path(self.cfg.checkpoint).parent.parent / 'renderings' / 'temp'
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        temp_file = temp_dir / f'video_temp_{len(self._video_temp_files):06d}.mp4'
+        
+        # 保存当前buffer到临时文件
+        imageio.mimsave(temp_file, self._video_buffer, fps=self.fps, macro_block_size=self.macro_block_size)
+        self._video_temp_files.append(temp_file)
+        
+        logger.debug(f"Flushed {len(self._video_buffer)} frames to temp file: {temp_file}")
+        self._video_buffer = []  # 清空buffer
+    
+    def _save_video(self):
+        """保存视频，合并所有临时文件和当前buffer"""
+        # 如果已经保存过，直接返回，避免重复保存
+        if hasattr(self, '_video_saved') and self._video_saved:
+            logger.debug("Video already saved, skipping...")
+            return
+        
+        import imageio
+        
+        model_path:Path = self.cfg.checkpoint
+        model_id = model_path.stem.replace('model_', 'ckpt_')
+        video_path:Path = model_path.parent.parent / 'renderings' / model_id / f'video_{time.strftime("%Y%m%d_%H%M%S")}.mp4'
+        video_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # 如果有临时文件，需要合并
+        if len(self._video_temp_files) > 0:
+            # 先保存当前buffer到临时文件（如果有内容）
+            if len(self._video_buffer) > 0:
+                self._flush_video_buffer_to_temp_file()
+            
+            # 读取所有临时文件并合并
+            logger.info(f"Merging {len(self._video_temp_files)} temp files...")
+            all_frames = []
+            for temp_file in self._video_temp_files:
+                try:
+                    reader = imageio.get_reader(temp_file)
+                    frames = [frame for frame in reader]
+                    all_frames.extend(frames)
+                    reader.close()
+                except Exception as e:
+                    logger.warning(f"Failed to read temp file {temp_file}: {e}")
+            
+            # 保存合并后的视频
+            if len(all_frames) > 0:
+                imageio.mimsave(video_path, all_frames, fps=self.fps, macro_block_size=self.macro_block_size)
+                logger.info(f"Video saved to {video_path} ({len(all_frames)} frames)")
+                self._video_saved = True  # 标记已保存
+            else:
+                logger.warning("No frames to save!")
+            
+            # 清理临时文件
+            temp_dir = None
+            for temp_file in self._video_temp_files:
+                if temp_dir is None:
+                    temp_dir = temp_file.parent
+                try:
+                    temp_file.unlink()
+                except Exception as e:
+                    logger.warning(f"Failed to delete temp file {temp_file}: {e}")
+            
+            # 清理临时目录（如果为空）
+            if temp_dir is not None:
+                try:
+                    if temp_dir.exists() and not any(temp_dir.iterdir()):
+                        temp_dir.rmdir()
+                except Exception:
+                    pass
+        else:
+            # 没有临时文件，直接保存当前buffer
+            if len(self._video_buffer) > 0:
+                imageio.mimsave(video_path, self._video_buffer, fps=self.fps, macro_block_size=self.macro_block_size)
+                logger.info(f"Video saved to {video_path} ({len(self._video_buffer)} frames)")
+                self._video_saved = True  # 标记已保存
+            else:
+                logger.warning("No frames to save!")
         
 
 class MujocoRobot(URCIRobot, ViewerPlugin):
@@ -305,7 +401,8 @@ class MujocoRobot(URCIRobot, ViewerPlugin):
         assert self.dt == self.decimation * self.sim_dt
         # self._subtimer = 0
         
-        
+        # 设置仿真FPS，用于录屏采样
+        self._sim_fps = cfg.simulator.config.sim.fps
         
         self.model = mujoco.MjModel.from_xml_path(os.path.join(cfg.robot.asset.asset_root, cfg.robot.asset.xml_file)) # type: ignore
         print("XML", cfg.robot.asset.xml_file)

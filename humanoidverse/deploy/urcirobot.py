@@ -183,13 +183,28 @@ class URCIRobot:
                 self.TrySaveMotionStep()
                 
                 if self.motion_len > 0 and self.ref_motion_phase > 1.0:
-                    # self.Reset()
+                    self.TrySaveMotionFile(pid=cur_pid)
+                    logger.info("Motion End.")
+                    
+                    # 如果启用了动作完成后自动退出
+                    if hasattr(self.cfg.deploy, 'exit_on_motion_end') and self.cfg.deploy.exit_on_motion_end:
+                        logger.info("Motion completed. Exiting and saving recording...")
+                        # 如果正在录屏，先保存录屏
+                        if hasattr(self, 'is_recording') and self.is_recording:
+                            if hasattr(self, '_save_video'):
+                                try:
+                                    logger.info("Saving video before exit...")
+                                    self._save_video()
+                                except Exception as save_error:
+                                    logger.warning(f"Failed to save video before exit: {save_error}")
+                        raise RobotExitException("Motion End - Auto Exit")
+                    
+                    # 否则切换到默认策略
                     if self._ref_pid == 0:
                         self._ref_pid = -2
                     else:
                         self._ref_pid = 0
-                    self.TrySaveMotionFile(pid=cur_pid)
-                    logger.info("Motion End. Switch to the Default Policy")
+                    logger.info("Switch to the Default Policy")
                 t2 = time.time()
                 
                 # print(f"t2-t1 = {(t2-t1)*1e3} ms")
@@ -203,6 +218,13 @@ class URCIRobot:
                         logger.warning(f"Warning! delay = {t2-t1} longer than policy_dt = {self.dt} , skip sleeping")
         except RobotExitException as e:
             self.TrySaveMotionFile(pid=cur_pid)
+            # 如果正在录屏，保存录屏（MujocoRobot会实现这个方法）
+            if hasattr(self, 'is_recording') and self.is_recording:
+                if hasattr(self, '_save_video'):
+                    try:
+                        self._save_video()
+                    except Exception as save_error:
+                        logger.warning(f"Failed to save video on exit: {save_error}")
             raise e
         ...
     

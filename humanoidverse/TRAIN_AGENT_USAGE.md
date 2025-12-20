@@ -152,8 +152,13 @@ python humanoidverse/train_agent.py [参数]
   - 示例: `algo.config.save_interval=500`
 
 - `algo.config.logging_interval` (默认: 25)
-  - 日志记录间隔（每 N 次迭代记录一次）
-  - 示例: `algo.config.logging_interval=10`
+  - **终端日志输出间隔**（每 N 次迭代在终端输出一次训练信息）
+  - 控制训练过程中终端显示的日志频率，不影响模型保存
+  - 建议设置：
+    - 调试时：设置为 10-20，更频繁地监控训练进度
+    - 正式训练：设置为 25-50，减少终端输出
+  - 示例: `algo.config.logging_interval=10`（每10次迭代输出一次）
+  - **注意**：此参数与 `save_interval` 独立，可以设置不同的值
 
 #### 学习相关参数
 
@@ -822,6 +827,49 @@ Checkpoint 包含以下内容：
 4. **迭代次数** - 训练会从该迭代次数继续
 
 **详细说明：** 见 [Checkpoint 加载机制](#checkpoint-加载机制) 章节
+
+### Q13: 如何调整终端日志输出的迭代间隔？
+
+**问题：** 训练有随机性，想要更频繁地监控训练进度，避免错过较优区间的结果。
+
+**解决方案：**
+可以通过 `algo.config.logging_interval` 参数设置终端日志输出的迭代间隔。
+
+**使用方法：**
+```bash
+# 设置每10次迭代输出一次日志（更频繁监控）
+algo.config.logging_interval=10
+
+# 设置每20次迭代输出一次日志（中等频率）
+algo.config.logging_interval=20
+
+# 设置每50次迭代输出一次日志（较少输出，默认25）
+algo.config.logging_interval=50
+```
+
+**建议：**
+- **调试阶段**：设置为 10-20，可以更频繁地观察训练状态
+- **正式训练**：设置为 25-50，减少终端输出，但仍能监控进度
+- **注意**：`logging_interval` 与 `save_interval`（模型保存间隔）是独立的，可以设置不同的值
+  - 例如：`algo.config.logging_interval=10` + `algo.config.save_interval=2000`
+  - 这样每10次迭代输出一次日志，但每2000次迭代才保存一次模型
+
+**示例命令：**
+```bash
+python humanoidverse/train_agent.py \
++simulator=isaacgym +exp=motion_tracking +terrain=terrain_locomotion_plane \
+project_name=MotionTracking num_envs=4096 \
++obs=motion_tracking/main \
++robot=g1/g1_23dof_lock_wrist \
++domain_rand=main \
++rewards=motion_tracking/main \
+experiment_name=debug \
+robot.motion.motion_file="example/motion_data/Horse-stance_pose.pkl" \
+seed=1 \
++device=cuda:0 \
+algo.config.logging_interval=10 \
+algo.config.save_interval=2000
+```
 
 ---
 

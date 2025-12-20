@@ -8,6 +8,7 @@ deploy:
   render: True
   defcmd: [0.0, 0.0, 0.0, 0.0]
   heading_cmd: True
+  exit_on_motion_end: False  # 动作完成后自动退出并保存录屏
 
   ctrl_dt: 0.02
   net: ???

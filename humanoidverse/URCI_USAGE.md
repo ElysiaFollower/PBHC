@@ -31,6 +31,8 @@ python humanoidverse/urci.py [参数]
 ### 可选参数
 
 - `+opt=record` - 启用动作数据保存
+- `+recording=True` - 启用视频录制（录屏）
+- `+deploy.exit_on_motion_end=True` - 动作完成后自动退出并保存录屏
 - 其他配置参数（见下方详细说明）
 
 ---
@@ -146,7 +148,32 @@ python humanoidverse/urci.py [参数]
   - 是否启用 EMA（指数移动平均）切换
   - 示例: `deploy.SWITCH_EMA=True`
 
-### 7. 环境配置参数 (`env.config.*`)
+- `deploy.exit_on_motion_end` (默认: False)
+  - 动作完成后是否自动退出并保存录屏
+  - 当设置为 `True` 时，动作播放完成后会自动：
+    - 保存动作数据（如果启用了 `save_motion`）
+    - 保存录屏视频（如果启用了 `recording`）
+    - 退出仿真程序
+  - 适用于需要批量录制动作视频的场景
+  - 示例: `+deploy.exit_on_motion_end=True`
+
+### 7. 视频录制参数 (`recording`)
+
+- `recording` (默认: False)
+  - 是否启用视频录制功能
+  - 启用后会在仿真过程中录制视频，保存为 MP4 格式
+  - 录屏帧率固定为 30fps，基于仿真步采样（与仿真速度同步）
+  - 视频保存在: `{checkpoint父目录}/renderings/ckpt_{ckpt_num}/video_{时间戳}.mp4`
+  - **注意**: 录屏速度与仿真速度同步，不受电脑性能影响
+  - 示例: `+recording=True`
+
+**录屏技术细节：**
+- 采样方式：基于仿真步，每 `sim_fps/30` 个仿真步采样一帧
+- Buffer 管理：当 buffer 达到 1000 帧时自动写入临时文件，避免内存溢出
+- 性能优化：支持长时间录制，通过临时文件机制管理内存
+- 同步机制：录屏帧率与仿真速度同步，确保视频播放速度正确
+
+### 8. 环境配置参数 (`env.config.*`)
 
 - `env.config.env_spacing` (默认: 从训练配置继承)
   - 环境间距（多环境时使用）
@@ -258,11 +285,43 @@ python humanoidverse/urci.py \
   robot.asset.xml_file=g1/g1_23dof_lock_wrist_rev_2.xml
 ```
 
+### 示例 10: 启用视频录制
+
+```bash
+python humanoidverse/urci.py \
+  +simulator=mujoco \
+  +checkpoint=example/pretrained_horse_stance_pose/exported/model_50000.onnx \
+  +recording=True
+```
+
+### 示例 11: 动作完成后自动退出并保存录屏
+
+```bash
+python humanoidverse/urci.py \
+  +opt=record \
+  +simulator=mujoco \
+  +checkpoint=example/student-v2/exported/v2-model_76000.onnx \
+  +robot.motion.motion_file="example/motion_data/merged/4merged_motion.pkl" \
+  +robot.asset.xml_file=g1/g1_23dof_lock_wrist_rev_2.xml \
+  simulator.config.sim.fps=200 \
+  simulator.config.sim.control_decimation=4 \
+  +deploy.ctrl_dt=0.02 \
+  +recording=True \
+  +deploy.exit_on_motion_end=True
+```
+
+**说明：**
+- `+deploy.exit_on_motion_end=True` 启用后，动作播放完成会自动退出
+- 适用于批量录制动作视频的场景，无需手动关闭仿真
+- 退出前会自动保存录屏和动作数据
+
 ---
 
 ## 键盘控制
 
 在 MuJoCo 查看器窗口中，可以使用以下键盘快捷键进行控制：
+
+**注意：** 动作切换功能（`N` 键）仅在动作跟踪任务（`motion_tracking`）中可用，且需要配置了 `robot.motion.motion_file` 参数。
 
 ### 运动控制（ViewerPlugin 模式）
 
@@ -289,6 +348,9 @@ python humanoidverse/urci.py \
 - **`[` (左方括号)**: 切换到上一个策略（`_ref_pid -= 1`）
 - **`]` (右方括号)**: 切换到下一个策略（`_ref_pid += 1`）
 - **`0-9` (数字键)**: 直接切换到指定策略索引（0-9）
+- **`N`**: 切换到下一个动作（仅限动作跟踪任务，需要 `motion_lib` 存在）
+  - **注意**：动作切换是循环的，没有直接切换到上一个动作的快捷键
+  - **变通方法**：由于是循环切换，可以连续按 `N` 键循环回到上一个动作（需要按 `总动作数 - 1` 次）
 
 ### 运动控制（MViewerPlugin 模式）
 
@@ -307,6 +369,9 @@ python humanoidverse/urci.py \
 - **`Esc`**: 退出查看器
 - **`Enter`**: 重置动作参考
 - **`[` / `]`**: 切换策略
+- **`N`**: 切换到下一个动作（仅限动作跟踪任务，需要 `motion_lib` 存在）
+  - **注意**：动作切换是循环的，没有直接切换到上一个动作的快捷键
+  - **变通方法**：由于是循环切换，可以连续按 `N` 键循环回到上一个动作
 
 ### 命令格式
 
@@ -358,8 +423,14 @@ python humanoidverse/urci.py \
     - `cmd`: 命令
 
 - **渲染视频 (`*.mp4`)**: 
-  - 如果启用录制，会保存渲染视频
+  - 如果启用录制（`+recording=True`），会保存渲染视频
   - 保存在 `renderings/ckpt_{ckpt_num}/` 目录
+  - 视频格式：MP4，30fps
+  - 文件名格式：`video_{时间戳}.mp4`
+  - **录屏特点**：
+    - 基于仿真步采样，与仿真速度同步
+    - 不受电脑性能影响，录屏速度始终正确
+    - 支持长时间录制，自动管理内存
 
 - **评估日志**: 
   - 保存在 `logs_eval/{eval_name}/{eval_timestamp}/`
@@ -441,6 +512,89 @@ python humanoidverse/urci.py \
 deploy.render=False
 ```
 
+### Q12: 如何启用视频录制
+
+**解决方案：**
+```bash
++recording=True
+```
+
+**说明：**
+- 录屏帧率固定为 30fps
+- 基于仿真步采样，与仿真速度同步
+- 视频保存在 `renderings/ckpt_{ckpt_num}/` 目录
+- 支持长时间录制，自动管理内存
+
+### Q13: 动作完成后如何自动退出并保存录屏
+
+**解决方案：**
+```bash
++deploy.exit_on_motion_end=True
+```
+
+**说明：**
+- 动作播放完成后自动退出仿真
+- 退出前会自动保存录屏（如果启用了 `recording`）
+- 退出前会自动保存动作数据（如果启用了 `save_motion`）
+- 适用于批量录制动作视频的场景
+
+**完整示例：**
+```bash
+python humanoidverse/urci.py \
+  +opt=record \
+  +simulator=mujoco \
+  +checkpoint=path/to/model.onnx \
+  +robot.motion.motion_file="path/to/motion.pkl" \
+  +recording=True \
+  +deploy.exit_on_motion_end=True
+```
+
+### Q14: 录屏速度是否与仿真速度同步
+
+**答案：是的，已同步**
+
+**说明：**
+- 录屏采样基于仿真步，而非真实时间
+- 采样间隔 = `sim_fps / 30`（例如：500fps 仿真 → 每16步采样一帧 → 约31.25fps录屏）
+- 即使电脑性能不足导致仿真变慢，录屏速度仍然正确
+- 视频播放时，动作速度与仿真速度一致
+
+### Q15: 长时间录制会占用大量内存吗
+
+**答案：不会**
+
+**说明：**
+- 系统会自动管理内存，当 buffer 达到 1000 帧时写入临时文件
+- 支持无限时长录制，内存占用保持稳定
+- 退出时自动合并所有临时文件为最终视频
+
+### Q11: 如何切换播放的动作
+
+**解决方案：**
+- 在 ViewerPlugin 模式下，按 **`N`** 键可以切换到下一个动作
+- **前提条件：**
+  - 必须是动作跟踪任务（`log_task_name == "motion_tracking"`）
+  - 必须配置了 `robot.motion.motion_file` 参数
+  - 动作库（`motion_lib`）必须已加载
+- **功能说明：**
+  - 按 `N` 键会循环切换到动作库中的下一个动作
+  - 新动作会保持机器人当前的朝向（Yaw 角度对齐）
+  - 切换时不会重置物理状态，只会重置动作计时器
+  - 控制台会输出当前动作 ID 和总动作数
+- **切换到上一个动作：**
+  - **目前没有直接的快捷键**来切换到上一个动作
+  - **变通方法**：由于动作切换是循环的（`(cur_motion_id + 1) % total_motions`），可以通过连续按 `N` 键来循环回到上一个动作
+  - 例如：如果总共有 5 个动作，当前是动作 2，想回到动作 1，需要连续按 4 次 `N` 键（2→3→4→0→1）
+  - 控制台会显示当前动作 ID，可以根据需要计算需要按多少次
+- **示例：**
+  ```bash
+  python humanoidverse/urci.py \
+    +simulator=mujoco \
+    +checkpoint=path/to/model.onnx \
+    robot.motion.motion_file="path/to/motion_data"
+  ```
+  运行后，在 MuJoCo 查看器窗口中按 `N` 键即可切换动作
+
 ---
 
 ## 相关文档
@@ -459,10 +613,22 @@ deploy.render=False
 2. **配置兼容性**: 多策略模式下，所有策略的配置必须兼容
 3. **键盘控制**: 确保查看器窗口处于焦点状态才能使用键盘控制
 4. **动作保存**: 使用 `+opt=record` 启用动作保存，数据会保存在 motions 目录
-5. **性能**: 禁用渲染可以提高性能，但无法看到可视化效果
-6. **安全**: 在真实机器人上部署前，务必在仿真环境中充分测试
+5. **视频录制**: 使用 `+recording=True` 启用视频录制，视频会保存在 renderings 目录
+6. **自动退出**: 使用 `+deploy.exit_on_motion_end=True` 可以在动作完成后自动退出，适用于批量录制
+7. **录屏同步**: 录屏速度与仿真速度同步，不受电脑性能影响
+8. **性能**: 禁用渲染可以提高性能，但无法看到可视化效果
+9. **安全**: 在真实机器人上部署前，务必在仿真环境中充分测试
 
 ---
 
-**最后更新**: 2024年
+**最后更新**: 2025年
+
+## 更新日志
+
+### 2025年更新
+
+- **新增**: `deploy.exit_on_motion_end` 参数，支持动作完成后自动退出并保存录屏
+- **改进**: 录屏逻辑优化，基于仿真步采样，与仿真速度同步
+- **改进**: 录屏内存管理优化，支持长时间录制而不占用大量内存
+- **新增**: 视频录制功能文档说明
 

@@ -25,6 +25,7 @@ python mink_retarget/convert_fit_motion.py ../test_motion_data \
     --humanoid-mjcf-path ../description/robots/g1/smpl_humanoid.xml \
     --correct \
     --correct-mode force  # 可选: "force" (强制贴地，推荐) 或 "contact" (基于接触检测)
+    # 注意：默认会自动修复瞬移异常（--fix-flying），速度阈值默认10m/s
    
 # 4. 结果位置
 # PKL文件：smpl_retarget/retargeted_motion_data/mink/gangster.pkl
@@ -212,6 +213,7 @@ python mink_retarget/convert_fit_motion.py ../test_motion_data \
     --humanoid-mjcf-path ../description/robots/g1/smpl_humanoid.xml \
     --correct \
     --correct-mode force  # 可选: "force" (强制贴地，推荐) 或 "contact" (基于接触检测)
+    # 注意：默认会自动修复瞬移异常（--fix-flying），速度阈值默认10m/s
 ```
 
 > **重要**：
@@ -233,6 +235,16 @@ python mink_retarget/convert_fit_motion.py ../test_motion_data \
     - 强去噪能力，精确切掉高频抖动（>3Hz）
     - 可调节 `cutoff` 参数（推荐3.0）控制平滑度 vs 贴地紧密度
   - `"contact"`：接触检测模式，基于脚部速度和高度检测接触状态，适用于包含跳跃动作的高质量动捕数据
+- `--fix-flying`: **新增！** 启用瞬移异常修复（默认：`True`）
+  - 自动检测并修复速度超过阈值的异常帧（瞬移）
+  - 防止物理模拟器因极高速度而崩溃
+  - 如果检测到异常帧，会在控制台输出警告信息
+  - 建议保持默认开启，除非数据质量极高且不需要此保护
+- `--flying-threshold`: 速度阈值（默认：`10.0` m/s）
+  - 当两帧之间的根节点速度超过此阈值时，会被判定为瞬移异常
+  - 默认值 10.0 m/s 相当于人类极限冲刺速度（博尔特级别）
+  - 异常帧会被强制锁定在上一帧的位置（原地踏步）
+  - 可根据数据质量调整：数据质量高可适当提高（如 15.0），数据质量差可降低（如 5.0）
 
 **输出**：
 - 重定向后的npy文件：`test_motion_data/video_motion-g1_retargeted_npy/gangster.npy`（相对于数据目录）
@@ -293,6 +305,7 @@ python mink_retarget/convert_fit_motion.py ../test_motion_data \
     --humanoid-mjcf-path ../description/robots/g1/smpl_humanoid.xml \
     --correct \
     --correct-mode force  # 可选: "force" (强制贴地，推荐) 或 "contact" (基于接触检测)
+    # 注意：默认会自动修复瞬移异常（--fix-flying），速度阈值默认10m/s
 
 # ===== 步骤6：验证结果 =====
 # PKL文件保存在 smpl_retarget/retargeted_motion_data/mink/ 目录下
