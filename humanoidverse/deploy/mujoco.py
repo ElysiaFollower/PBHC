@@ -308,25 +308,60 @@ class ViewerPlugin:
             if len(self._video_buffer) > 0:
                 self._flush_video_buffer_to_temp_file()
             
-            # 读取所有临时文件并合并
+            # 使用流式处理合并临时文件，避免内存溢出
             logger.info(f"Merging {len(self._video_temp_files)} temp files...")
-            all_frames = []
-            for temp_file in self._video_temp_files:
-                try:
-                    reader = imageio.get_reader(temp_file)
-                    frames = [frame for frame in reader]
-                    all_frames.extend(frames)
-                    reader.close()
-                except Exception as e:
-                    logger.warning(f"Failed to read temp file {temp_file}: {e}")
             
-            # 保存合并后的视频
-            if len(all_frames) > 0:
-                imageio.mimsave(video_path, all_frames, fps=self.fps, macro_block_size=self.macro_block_size)
-                logger.info(f"Video saved to {video_path} ({len(all_frames)} frames)")
-                self._video_saved = True  # 标记已保存
-            else:
-                logger.warning("No frames to save!")
+            # 使用流式写入，避免一次性加载所有帧到内存
+            writer = None
+            total_frames = 0
+            valid_files = []
+            
+            try:
+                # 创建writer
+                writer = imageio.get_writer(video_path, fps=self.fps, macro_block_size=self.macro_block_size)
+                
+                # 逐个读取临时文件并写入，使用流式处理
+                for temp_file in self._video_temp_files:
+                    if not temp_file.exists():
+                        logger.warning(f"Temp file not found: {temp_file}, skipping...")
+                        continue
+                    
+                    try:
+                        reader = imageio.get_reader(temp_file)
+                        file_frame_count = 0
+                        # 流式读取：逐帧读取并写入，不全部加载到内存
+                        for frame in reader:
+                            writer.append_data(frame)
+                            file_frame_count += 1
+                            total_frames += 1
+                        reader.close()
+                        valid_files.append(temp_file)
+                        logger.debug(f"Processed {file_frame_count} frames from {temp_file.name}")
+                    except Exception as e:
+                        logger.warning(f"Failed to read temp file {temp_file}: {e}, skipping...")
+                        continue
+                
+                writer.close()
+                
+                if total_frames > 0:
+                    logger.info(f"Video saved to {video_path} ({total_frames} frames from {len(valid_files)} files)")
+                    self._video_saved = True  # 标记已保存
+                else:
+                    logger.warning("No frames to save!")
+                    # 如果没有任何有效帧，删除空文件
+                    try:
+                        video_path.unlink()
+                    except Exception:
+                        pass
+                        
+            except Exception as e:
+                logger.error(f"Failed to merge video files: {e}")
+                if writer is not None:
+                    try:
+                        writer.close()
+                    except Exception:
+                        pass
+                raise
             
             # 清理临时文件
             temp_dir = None
