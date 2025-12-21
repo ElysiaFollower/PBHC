@@ -1,15 +1,15 @@
-# VMD to PKL Converter
+# VMD to SMPL Converter
 
-This directory contains scripts to convert VMD (MikuMikuDance) motion files to the project's required PKL format.
+This directory contains scripts to convert VMD (MikuMikuDance) motion files to SMPL format.
 
 ## Overview
 
-The conversion process involves:
+This converter transforms VMD (MikuMikuDance) motion files into SMPL format. The conversion process involves:
+
 1. **Parsing VMD file**: Extract bone animation data from VMD binary format
 2. **Bone mapping**: Map MMD bone names to SMPL joint structure
-3. **SMPL conversion**: Convert VMD bone rotations to SMPL pose format
-4. **Retargeting**: Retarget SMPL motion to robot DOF using Mink retargeting
-5. **PKL output**: Generate final PKL file in project format
+3. **SMPL conversion**: Convert VMD bone rotations to SMPL pose format (axis-angle representation)
+4. **Output**: Save as `.npz` file in SMPL format
 
 ## Requirements
 
@@ -58,52 +58,44 @@ For VMD parsing, you can use one of these libraries:
 When using PowerShell with filenames containing special characters (like parentheses), use quotes:
 
 ```powershell
-python vmd_to_pkl.py --input "vmd/愛包ダンスホール_DanceMotion_HimeTanaka(MMD)_v1.1.vmd" --output output.pkl
-```
-
-Or use the provided batch file:
-
-```cmd
-run_conversion.bat
+python vmd_to_smpl.py --input "vmd/愛包ダンスホール_DanceMotion_HimeTanaka(MMD)_v1.1.vmd" --output output.npz
 ```
 
 ### Linux/Mac
 
 ```bash
-python vmd_to_pkl.py --input vmd/input.vmd --output output.pkl
+python vmd_to_smpl.py --input vmd/input.vmd --output output.npz
 ```
 
 ### With custom frame rate:
 
 ```bash
-python vmd_to_pkl.py --input vmd/input.vmd --output output.pkl --fps 30
+python vmd_to_smpl.py --input vmd/input.vmd --output output.npz --fps 30
 ```
 
-### For different robot types:
+### Using example script:
 
 ```bash
-python vmd_to_pkl.py --input vmd/input.vmd --output output.pkl --robot_type g1
+python example_usage.py
 ```
 
-## Arguments
+## Arguments (vmd_to_smpl.py)
 
 - `--input`: Path to input VMD file (required)
-- `--output`: Path to output PKL file (required)
+- `--output`: Path to output SMPL file (.npz format, required)
 - `--fps`: Frame rate (default: 30.0)
-- `--robot_type`: Robot type, either 'g1' or 'h1' (default: 'g1')
-- `--humanoid_mjcf`: Path to humanoid MJCF file (optional, uses default if not specified)
 
-## Output Format
+## Output Format (SMPL .npz file)
 
-The output PKL file contains a dictionary with the following keys:
+The output `.npz` file contains a dictionary with the following keys:
 
-- `root_trans_offset`: Root translation [num_frames, 3]
-- `root_rot`: Root rotation quaternion [num_frames, 4]
-- `dof`: Robot DOF positions [num_frames, num_dof]
-- `pose_aa`: Pose in axis-angle format [num_frames, num_joints, 3]
-- `smpl_joints`: SMPL joint positions (zeros) [num_frames, num_joints, 3]
-- `fps`: Frame rate
-- `contact_mask`: Contact mask for feet [num_frames, 2]
+- `pose_aa`: SMPL pose in axis-angle format [num_frames, 72] (24 joints * 3)
+- `poses`: SMPL pose in axis-angle format [num_frames, 66] (22 joints * 3, for compatibility)
+- `trans`: Root translation [num_frames, 3]
+- `betas`: SMPL shape parameters [10] (set to zeros)
+- `gender`: Gender string (default: 'neutral')
+- `fps`: Frame rate (float)
+- `mocap_framerate`: Frame rate (int)
 
 ## Bone Mapping
 
@@ -135,8 +127,6 @@ The script maps MMD bone names to SMPL joints:
 
 - The script handles VMD files with Japanese character encoding (Shift-JIS)
 - If a bone is not found in the mapping, it will be skipped
-- The conversion uses Mink retargeting pipeline, which may take some time for long animations
-- Contact mask is automatically generated based on foot positions
 - **The script automatically changes the working directory to the project root** to ensure correct imports
 
 ## Troubleshooting
@@ -161,7 +151,7 @@ python -c "import smpl_sim; print('smpl_sim installed successfully')"
 If PowerShell interprets parentheses in filenames as commands, use quotes around the filename:
 
 ```powershell
-python vmd_to_pkl.py --input "vmd/file(MMD).vmd" --output output.pkl
+python vmd_to_smpl.py --input "vmd/file(MMD).vmd" --output output.npz
 ```
 
 ### Import errors

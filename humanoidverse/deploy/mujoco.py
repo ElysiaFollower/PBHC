@@ -111,7 +111,7 @@ class ViewerPlugin:
     # TODO: visualize the motion keypoint in MujocoViewer
     
     is_recording = False
-    fps = 30  # 录屏目标帧率
+    fps = 50  # 录屏目标帧率
     _video_buffer_max_size = 1000  # buffer最大帧数，超过后写入临时文件
     
     def _make_viewer(self):
