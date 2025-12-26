@@ -52,7 +52,7 @@ def key_call_back( keycode):
     elif chr(keycode) == " ":
         print("Paused")
         paused = not paused
-    elif keycode == 256 or chr(keycode) == "Q":
+    elif keycode == 256:  # Esc 键
         print("Esc")
         os._exit(0)
     elif chr(keycode) == 'L':
@@ -68,11 +68,11 @@ def key_call_back( keycode):
         time_step+=dt
     elif keycode == 263: #(Left)
         time_step-=dt
-    elif chr(keycode) == "Q":
+    elif chr(keycode) == "A":  # 修改左脚接触状态
         print('Modify left foot contact!!!')
         contact_mask[curr_time][0] = 1. - contact_mask[curr_time][0]
         resave = True
-    elif chr(keycode) == "E":
+    elif chr(keycode) == "E":  # 修改右脚接触状态
         print('Modify right foot contact!!!')
         contact_mask[curr_time][1] = 1. - contact_mask[curr_time][1]
         resave = True
