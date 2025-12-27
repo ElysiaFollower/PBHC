@@ -106,6 +106,15 @@ class PPO(BaseAlgo):
         self.dagger_only = self.config.dagger_only
         if self.train_distill:
             self._preprocess_teacher_config()
+            # BC loss coefficient for distillation (only used in non-DAGGER-only mode)
+            self.bc_loss_coef = self.config.get("bc_loss_coef", 1.0)
+            # BC loss coefficient decay schedule: [start_iter, end_iter, start_coef, end_coef]
+            # If None, bc_loss_coef remains constant
+            self.bc_loss_coef_schedule = self.config.get("bc_loss_coef_schedule", None)
+            self.bc_loss_coef_start = self.bc_loss_coef
+        else:
+            self.bc_loss_coef = 0.0
+            self.bc_loss_coef_schedule = None
 
         self.actor_type = self.config.module_dict.get("actor", {}).get("type", "MLP")
         if not self.dagger_only:
@@ -229,6 +238,14 @@ class PPO(BaseAlgo):
 
             self.alg.load_state_dict(loaded_dict["model_state_dict"])
             if self.load_optimizer:
+                # Warning: If switching from dagger_only=True to False, optimizer state may be incompatible
+                # The optimizer state was trained with only BC loss, but now includes PPO losses
+                if self.train_distill and not self.dagger_only:
+                    logger.warning(
+                        "Loading optimizer state in non-DAGGER-only distillation mode. "
+                        "If this checkpoint was trained with dagger_only=True, consider setting "
+                        "load_optimizer=False to avoid momentum mismatch."
+                    )
                 self.optimizer.load_state_dict(loaded_dict["optimizer_state_dict"])
                 self.learning_rate = loaded_dict["optimizer_state_dict"]["param_groups"][0]["lr"]
                 self.set_learning_rate(self.learning_rate)
@@ -313,6 +330,18 @@ class PPO(BaseAlgo):
         for it in range(self.current_learning_iteration, tot_iter):
             self.hist_encoding = True
             self.start_time = time.time()
+
+            # Update BC loss coefficient if schedule is provided
+            if self.bc_loss_coef_schedule is not None and not self.dagger_only:
+                start_iter, end_iter, start_coef, end_coef = self.bc_loss_coef_schedule
+                if it < start_iter:
+                    self.bc_loss_coef = start_coef
+                elif it >= end_iter:
+                    self.bc_loss_coef = end_coef
+                else:
+                    # Linear decay
+                    progress = (it - start_iter) / (end_iter - start_iter)
+                    self.bc_loss_coef = start_coef + (end_coef - start_coef) * progress
 
             obs_dict = self._rollout_step(obs_dict)
 
@@ -545,6 +574,7 @@ class PPO(BaseAlgo):
         for key in loss_dict.keys():
             loss_dict[key] /= num_updates
         self.storage.clear()
+        self.update_counter()
         return loss_dict
 
     def _init_hist_latent_loss_dict_at_dagger_step(self):
@@ -568,6 +598,7 @@ class PPO(BaseAlgo):
         loss_dict["Entropy"] = 0
         loss_dict["Surrogate"] = 0
         loss_dict["bc_loss"] = 0
+        loss_dict["priv_reg_loss"] = 0
         loss_dict["Actor_Load_Balancing_Loss"] = 0
         loss_dict["Critic_Load_Balancing_Loss"] = 0
         return loss_dict
@@ -639,11 +670,14 @@ class PPO(BaseAlgo):
                 for param_group in self.optimizer.param_groups:
                     param_group["lr"] = self.learning_rate
 
-        # Surrogate loss
-        ratio = torch.exp(actions_log_prob_batch - torch.squeeze(old_actions_log_prob_batch))
-        surrogate = -torch.squeeze(advantages_batch) * ratio
-        surrogate_clipped = -torch.squeeze(advantages_batch) * torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
-        surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+            # Surrogate loss
+            # Ensure dimensions match: old_actions_log_prob_batch is (batch, 1), actions_log_prob_batch is (batch,)
+            old_log_prob = old_actions_log_prob_batch.view_as(actions_log_prob_batch) if old_actions_log_prob_batch.dim() > 1 else old_actions_log_prob_batch
+            ratio = torch.exp(actions_log_prob_batch - old_log_prob)
+            advantages = advantages_batch.view_as(ratio) if advantages_batch.dim() > 1 else advantages_batch
+            surrogate = -advantages * ratio
+            surrogate_clipped = -advantages * torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
+            surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
 
         # Value function loss
         if self.use_clipped_value_loss:
@@ -721,7 +755,110 @@ class PPO(BaseAlgo):
             self.optimizer.step()
             return loss_dict
         else:
-            raise NotImplementedError("Distillation with PPO not implemented in non-DAGGER-only mode yet.")
+            # Non-DAGGER-only mode: combine PPO update with distillation loss
+            actions_batch = policy_state_dict["actions"]
+            old_actions_log_prob_batch = policy_state_dict["actions_log_prob"]
+            old_mu_batch = policy_state_dict["action_mean"]
+            old_sigma_batch = policy_state_dict["action_sigma"]
+            target_values_batch = policy_state_dict["values"]
+            advantages_batch = policy_state_dict["advantages"]
+            returns_batch = policy_state_dict["returns"]
+
+            self._actor_act_step(policy_state_dict, hist_encoding=False)
+            actions_log_prob_batch = self.alg.get_actions_log_prob(actions_batch)
+            value_batch = self._critic_eval_step(policy_state_dict)
+            mu_batch = self.alg.action_mean
+            sigma_batch = self.alg.action_std
+            entropy_batch = self.alg.entropy
+
+            # Adaptation module update
+            priv_latent_batch = self.alg.actor.priv_encoding(policy_state_dict["priv_obs"])
+            with torch.inference_mode():
+                hist_latent_batch = self.alg.actor.history_encoding(policy_state_dict["prop_history"])
+            priv_reg_loss = (priv_latent_batch - hist_latent_batch.detach()).norm(p=2, dim=1).mean()
+            priv_reg_stage = min(
+                max((self.counter - self.priv_reg_coef_schedual[2]), 0) / self.priv_reg_coef_schedual[3],
+                1,
+            )
+            priv_reg_coef = priv_reg_stage * (self.priv_reg_coef_schedual[1] - self.priv_reg_coef_schedual[0]) + self.priv_reg_coef_schedual[0]
+
+            # KL
+            if self.desired_kl is not None and self.schedule == "adaptive":
+                with torch.inference_mode():
+                    kl = torch.sum(
+                        torch.log(sigma_batch / (old_sigma_batch + 1e-5))
+                        + (old_sigma_batch**2 + (old_mu_batch - mu_batch) ** 2) / (2.0 * sigma_batch**2)
+                        - 0.5,
+                        axis=-1,
+                    )
+                    kl_mean = kl.mean()
+                    if kl_mean > self.desired_kl * 2.0:
+                        self.learning_rate = max(1e-5, self.learning_rate / 1.5)
+
+                    elif kl_mean < self.desired_kl / 2.0 and kl_mean > 0.0:
+                        self.learning_rate = min(1e-2, self.learning_rate * 1.5)
+
+                    for param_group in self.optimizer.param_groups:
+                        param_group["lr"] = self.learning_rate
+
+            # Surrogate loss
+            # Ensure dimensions match: old_actions_log_prob_batch is (batch, 1), actions_log_prob_batch is (batch,)
+            old_log_prob = old_actions_log_prob_batch.view_as(actions_log_prob_batch) if old_actions_log_prob_batch.dim() > 1 else old_actions_log_prob_batch
+            ratio = torch.exp(actions_log_prob_batch - old_log_prob)
+            advantages = advantages_batch.view_as(ratio) if advantages_batch.dim() > 1 else advantages_batch
+            surrogate = -advantages * ratio
+            surrogate_clipped = -advantages * torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param)
+            surrogate_loss = torch.max(surrogate, surrogate_clipped).mean()
+
+            # Value function loss
+            if self.use_clipped_value_loss:
+                value_clipped = target_values_batch + (value_batch - target_values_batch).clamp(-self.clip_param, self.clip_param)
+                value_losses = (value_batch - returns_batch).pow(2)
+                value_losses_clipped = (value_clipped - returns_batch).pow(2)
+                value_loss = torch.max(value_losses, value_losses_clipped).sum(dim=-1).mean()
+            else:
+                value_loss = (returns_batch - value_batch).pow(2).sum(dim=-1).mean()
+
+            if self.critic_type == "MoEMLP":
+                critic_load_balancing_loss = self.alg.critic.compute_load_balancing_loss() * self.config.get("load_balancing_loss_alpha", 1e-2)
+                loss_dict["Critic_Load_Balancing_Loss"] += critic_load_balancing_loss.item()
+                value_loss = value_loss + critic_load_balancing_loss
+
+                loss_dict["Critic_Load_Balancing_Loss"] += critic_load_balancing_loss.item()
+
+            entropy_loss = entropy_batch.mean()
+
+            actor_loss = surrogate_loss - self.entropy_coef * entropy_loss
+
+            # Load balancing loss (only for MoE-based actors)
+            if self.actor_type == "MoEMLP":
+                load_balancing_loss = self.alg.actor.actor_module.compute_load_balancing_loss() * self.config.get("load_balancing_loss_alpha", 1e-2)
+                actor_loss = actor_loss + load_balancing_loss
+                loss_dict["Actor_Load_Balancing_Loss"] += load_balancing_loss.item()
+
+            critic_loss = self.value_loss_coef * value_loss
+
+            # Distillation loss: BC loss between teacher and student actions
+            # Use the current action mean (mu_batch) as student actions for distillation
+            bc_loss = (actions_teacher_batch.detach() - mu_batch).norm(p=2, dim=1).mean()
+            loss_dict["bc_loss"] += bc_loss.item()
+
+            total_loss = actor_loss + critic_loss + priv_reg_coef * priv_reg_loss + self.bc_loss_coef * bc_loss
+
+            self.optimizer.zero_grad()
+
+            total_loss.backward()
+
+            nn.utils.clip_grad_norm_(self.alg.parameters(), self.max_grad_norm)
+
+            self.optimizer.step()
+
+            loss_dict["Surrogate"] += surrogate_loss.item()
+            loss_dict["Value"] += value_loss.item()
+            loss_dict["Entropy"] += entropy_loss.item()
+            loss_dict["priv_reg_loss"] += priv_reg_loss.item()
+
+            return loss_dict
 
     def update_counter(self):
         self.counter += 1
